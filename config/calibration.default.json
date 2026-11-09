@@ -1,0 +1,58 @@
+{
+  "strike_zone": {
+    "x1": 0.4516,
+    "y1": 0.6935,
+    "x2": 0.5381,
+    "y2": 0.8426
+  },
+  "lh_x_offset": 0.0155,
+  "marker_search_zone": {
+    "x1": 0.33,
+    "y1": 0.54,
+    "x2": 0.67,
+    "y2": 0.97
+  },
+  "scoreboard": {
+    "x1": 0.818,
+    "y1": 0.011,
+    "x2": 0.992,
+    "y2": 0.068
+  },
+  "info_panel": {
+    "x1": 0.806,
+    "y1": 0.898,
+    "x2": 0.992,
+    "y2": 0.988
+  },
+  "tab_panel": {
+    "x1": 0.8,
+    "y1": 0.655,
+    "x2": 0.994,
+    "y2": 0.988
+  },
+  "my_batting_row": "top",
+  "my_id": "",
+  "record_both": true,
+  "record_video": false,
+  "colors": {
+    "blue_h_min": 100,
+    "blue_h_max": 135,
+    "blue_s_min": 110,
+    "blue_v_min": 80,
+    "blue_b_minus_r": 45,
+    "red_h_low_max": 12,
+    "red_h_high_min": 166,
+    "red_s_min": 95,
+    "red_v_min": 65,
+    "red_r_minus_gb": 38,
+    "cyan_h_min": 80,
+    "cyan_h_max": 108,
+    "cyan_s_min": 35,
+    "cyan_v_min": 120,
+    "cyan_bg_minus_r": 20,
+    "sb_blue_b_minus_r": 30,
+    "hdr_mode": false,
+    "brightness_scale": 1.0
+  },
+  "save_snapshots": true
+}

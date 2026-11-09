@@ -1,0 +1,3 @@
+*.bat text eol=crlf
+使用說明.txt text eol=crlf
+*.png binary

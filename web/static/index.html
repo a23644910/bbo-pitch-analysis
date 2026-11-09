@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBO 投球分析</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Barlow+Condensed:wght@500;700&display=swap">
+<style>
+:root{
+  --bg:#0E1A2B; --panel:#16263D; --deep:#0E1A2B; --line:#2B4466; --line2:#22385A;
+  --fg:#E8EEF6; --muted:#A9B8CC; --gold:#FFD24A; --green:#3DDC84; --red:#FF6B5A;
+  --strike:#FF6B6B; --ball:#3DDC84; --hit:#4EA3FF;
+  --num:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif}
+button,select,input{font:inherit;color:inherit}
+button{cursor:pointer}
+.wrap{max-width:1180px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-left)) 40px max(16px,env(safe-area-inset-right));display:flex;flex-direction:column;gap:18px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.logo{font-family:var(--num);font-weight:700;font-size:30px;letter-spacing:.04em;color:var(--gold)}
+.ttl{font-size:18px;font-weight:500}
+.conn{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:#59677a;display:inline-block}
+.dot.live{background:var(--green)}
+.btn{min-height:44px;padding:0 16px;border-radius:10px;border:1px solid var(--line);background:var(--panel)}
+.btn:hover{border-color:#4a6a95}
+.btn.on{background:var(--gold);border-color:var(--gold);color:var(--deep);font-weight:700}
+.btn.sm{min-height:36px;padding:0 12px;font-size:13px}
+.btn.danger{border-color:#7a3a35;color:#ffb3a8}
+.cols{display:flex;flex-direction:row-reverse;flex-wrap:wrap;gap:18px;align-items:flex-start}
+.right{flex:1 1 420px;min-width:0;display:flex;flex-direction:column;gap:16px}
+.left{flex:1 1 500px;min-width:0;display:flex;flex-direction:column;gap:16px}
+.card{background:var(--panel);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:14px}
+.card.hl{border:1px solid var(--gold)}
+.h{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.h b{font-size:18px}
+.sub{font-size:13px;color:var(--muted)}
+.toast{font-size:13px;color:var(--muted);min-height:18px}
+.toast.warn{color:#ffb3a8}
+
+/* 記分板 */
+.sb{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.inn{font-family:var(--num);font-size:44px;font-weight:700;line-height:1}
+.inn small{font-size:26px;margin-left:4px}
+.lights{display:flex;gap:16px;font-family:var(--num);font-size:18px;font-weight:700}
+.lights>div{display:flex;align-items:center;gap:5px}
+.lt{width:14px;height:14px;border-radius:50%;background:#2B4466;display:inline-block}
+.lt.b{background:var(--green)} .lt.s{background:var(--gold)} .lt.o{background:var(--red)}
+.who{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;font-size:14px}
+.who>div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.who .k{font-size:12px;color:var(--muted)}
+.who .id{font-weight:700;font-size:16px;overflow-wrap:anywhere}
+
+/* 預測小九宮格 */
+.mini{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%;max-width:300px;align-self:center}
+.mini>div{aspect-ratio:1/1;border-radius:10px;background:var(--deep);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+.mini .p{font-family:var(--num);font-size:34px;font-weight:700;line-height:1}
+.mini .t{font-size:11px;font-weight:700}
+.mini .r1{background:var(--gold);color:var(--deep)}
+.mini .r2{background:#B8963A;color:#FFF4D0}
+.mini .r3{background:#5E5434;color:#FFF4D0}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chips.c{justify-content:center}
+.chip{padding:7px 14px;border-radius:18px;background:var(--line);font-size:14px;font-weight:700}
+.chip.top{background:var(--gold);color:var(--deep)}
+.chip.lite{background:var(--deep);font-weight:400}
+.chip.lite b{font-weight:700}
+
+/* 熱度九宮格 */
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.cell{border-radius:10px;min-height:126px;padding:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:#1A2B44;transition:box-shadow .2s}
+.cell .p{font-family:var(--num);font-size:46px;font-weight:700;line-height:1;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.35)}
+.grid.small .cell{min-height:84px;gap:5px}
+.grid.small .cell .p{font-size:32px}
+.tag{padding:3px 10px;border-radius:12px;font-size:13px}
+.tag.ball{background:var(--deep);color:var(--ball);font-weight:700}
+.tag.strike{background:rgba(14,26,43,.55);color:#CFE3FF}
+.cell{position:relative}
+/* 新一球動畫（版型 C：準星鎖定，1.5 秒） */
+@keyframes c-lock{0%{opacity:0;transform:scale(1.9) rotate(20deg)}28%{opacity:1;transform:scale(1) rotate(0)}38%{transform:scale(1.06)}48%{transform:scale(1)}80%{opacity:1}100%{opacity:0}}
+@keyframes c-chip{0%,20%{opacity:0;transform:translateY(8px)}35%{opacity:1;transform:none}85%{opacity:1}100%{opacity:0}}
+.c-lock{position:absolute;inset:-6px;animation:c-lock 1.5s cubic-bezier(.2,.8,.2,1) forwards;pointer-events:none;z-index:3}
+.c-lock i{position:absolute;width:26px;height:26px;border:0 solid var(--k)}
+.c-lock i:nth-child(1){left:0;top:0;border-left-width:5px;border-top-width:5px;border-radius:8px 0 0 0}
+.c-lock i:nth-child(2){right:0;top:0;border-right-width:5px;border-top-width:5px;border-radius:0 8px 0 0}
+.c-lock i:nth-child(3){left:0;bottom:0;border-left-width:5px;border-bottom-width:5px;border-radius:0 0 0 8px}
+.c-lock i:nth-child(4){right:0;bottom:0;border-right-width:5px;border-bottom-width:5px;border-radius:0 0 8px 0}
+.c-chip{box-shadow:0 0 0 2px #fff;position:absolute;left:50%;bottom:-14px;margin-left:-60px;width:120px;text-align:center;padding:4px 0;border-radius:12px;background:var(--k);color:var(--deep);font-size:14px;font-weight:700;animation:c-chip 1.5s ease-out forwards;z-index:4}
+.lastb{position:absolute;top:8px;right:8px;box-shadow:0 0 0 2px #fff;font-size:11px;font-weight:700;color:var(--deep);background:var(--k);padding:2px 7px;border-radius:10px}
+.legend{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+.legend i{width:100px;height:10px;border-radius:5px;background:linear-gradient(90deg,#22385A,#C9772E,#E5452B);display:inline-block}
+.empty{padding:18px;text-align:center;color:var(--muted);font-size:14px}
+
+/* 玩家選擇 */
+.slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.slot{min-height:56px;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--deep);display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:1px;text-align:left}
+.slot .s{font-size:11px;color:var(--muted)}
+.slot .i{font-size:15px;font-weight:700;overflow-wrap:anywhere}
+.slot.on{background:var(--gold);border-color:var(--gold);color:var(--deep)}
+.slot.on .s{color:var(--deep)}
+.slot:disabled{opacity:.5;cursor:default}
+.pchips{display:flex;gap:6px;flex-wrap:wrap}
+.pchip{min-height:36px;padding:0 12px;border-radius:18px;border:1px solid var(--line);background:transparent;font-size:13px}
+.pchip.on{background:var(--line);border-color:#8FB4E0}
+.seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{min-height:38px;padding:0 14px;border:0;background:var(--panel);font-size:13px}
+.seg button.on{background:var(--gold);color:var(--deep);font-weight:700}
+select.other{min-height:36px;border-radius:10px;border:1px solid var(--line);background:var(--deep);padding:0 8px;font-size:13px;max-width:100%}
+
+/* 逐球紀錄 */
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{color:var(--muted);font-size:12px;font-weight:500;text-align:left;padding:6px 4px}
+td{padding:7px 4px;border-top:1px solid var(--line2);vertical-align:middle}
+td.r{font-weight:700}
+.r.strike{color:var(--strike)} .r.ball{color:var(--ball)} .r.foul{color:#8EC5FF} .r.in_play{color:#8EC5FF}
+td.x{text-align:right;white-space:nowrap}
+.ib{min-height:32px;min-width:32px;border-radius:8px;border:1px solid var(--line);background:transparent;font-size:12px}
+.edit{display:flex;gap:6px;flex-wrap:wrap;padding:6px 0}
+.edit input,.edit select{min-height:36px;border-radius:8px;border:1px solid var(--line);background:var(--deep);padding:0 8px;width:110px}
+
+/* 設定 */
+.settings{display:flex;flex-direction:column;gap:14px}
+.settings .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.settings input{min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--deep);padding:0 12px}
+.settings label{font-size:13px;color:var(--muted)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="logo">BBO</span><span class="ttl">投球分析</span>
+      <span class="conn"><span class="dot" id="dot"></span><span id="connText">連線中…</span></span>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn" id="newGame">新的一場</button>
+      <button class="btn" id="setBtn" aria-expanded="false">設定</button>
+    </div>
+  </header>
+  <div class="card hl" id="upd" hidden style="flex-direction:row;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:12px 16px">
+    <span id="updText">有新版本</span>
+    <button class="btn on" id="updBtn">更新並重新啟動</button>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+
+  <section class="card settings" id="settings" hidden aria-label="設定">
+    <div class="h"><b>設定</b><button class="btn sm" id="setClose">關閉</button></div>
+    <form class="row" id="idForm">
+      <label for="idInput">我的遊戲 ID（用來判斷先攻／後攻）</label>
+      <input id="idInput" autocomplete="off" placeholder="例如 KDBear">
+      <button class="btn sm" type="submit">儲存</button>
+    </form>
+    <div class="row">
+      <label>先攻／後攻</label>
+      <div class="seg"><button id="rowAuto">自動</button><button id="rowTop">先攻</button><button id="rowBot">後攻</button></div>
+      <span class="sub" id="sideText"></span>
+    </div>
+    <div class="row sub" id="accText">預測命中率：尚無資料</div>
+    <div class="row">
+      <button class="btn sm" id="undoBtn">撤銷上一球</button>
+      <button class="btn sm" id="exportBtn">匯出 CSV</button>
+    </div>
+  </section>
+
+  <div class="cols">
+    <!-- 右欄 -->
+    <div class="right">
+      <section class="card" aria-label="記分板">
+        <div class="sb">
+          <div class="inn" id="inn">–</div>
+          <div class="lights">
+            <div>B <span class="lt" id="b1"></span><span class="lt" id="b2"></span><span class="lt" id="b3"></span></div>
+            <div>S <span class="lt" id="s1"></span><span class="lt" id="s2"></span></div>
+            <div>O <span class="lt" id="o1"></span><span class="lt" id="o2"></span></div>
+          </div>
+        </div>
+        <div class="who">
+          <div><span class="k" id="pitK">投球中</span><span class="id" id="pitId">—</span><span id="pitName">—</span></div>
+          <div><span class="k" id="batK">打擊中</span><span class="id" id="batId">—</span><span id="batName">—</span></div>
+        </div>
+      </section>
+
+      <section class="card hl" aria-label="下一球參考">
+        <div class="h"><b>下一球參考</b><span class="sub" id="predSub"></span></div>
+        <div class="mini" id="mini"></div>
+        <div class="chips c" id="predTypes"></div>
+        <div class="sub" id="predNote" style="text-align:center"></div>
+      </section>
+
+      <section class="card" aria-label="玩家數據">
+        <div class="h"><b>玩家數據</b>
+          <div class="seg"><button id="vCur">本場</button><button id="vAll">全部場次</button></div>
+        </div>
+        <div class="slots" id="slots"></div>
+        <select class="other" id="otherSel" aria-label="其他玩家"></select>
+        <div class="pchips" id="pchips"></div>
+        <div class="grid small" id="pGrid"></div>
+        <div class="chips" id="pTypes"></div>
+        <div class="sub" id="pSum"></div>
+      </section>
+    </div>
+
+    <!-- 左欄：即時數據 -->
+    <div class="left">
+      <section class="card" aria-label="即時數據">
+        <div class="h">
+          <div style="display:flex;flex-direction:column;gap:2px"><b>即時數據</b><span class="sub" id="liveSub">本場・自動跟著目前投手</span></div>
+          <span class="legend">少<i></i>多</span>
+        </div>
+        <div class="grid" id="lGrid"></div>
+        <div class="sub">顏色越紅＝越常投這裡；綠色「壞球」標籤＝這格多半是壞球。</div>
+      </section>
+      <section class="card" aria-label="逐球紀錄">
+        <div class="h"><b>逐球紀錄</b><span class="sub">本場・這位投手・最新在上</span></div>
+        <div class="tbl"><table>
+          <thead><tr><th>局</th><th>球數</th><th>落點</th><th>球種</th><th>結果</th><th></th></tr></thead>
+          <tbody id="log"></tbody>
+        </table></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const VERSION = "2026-11-10c";
+  const $ = id => document.getElementById(id);
+  const RES = { strike: "好球", ball: "壞球", foul: "界外", in_play: "擊出" };
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ls = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+
+  const st = { status: null, data: null, player: "", pitcher: "all", scope: ls.get("bbo-pscope", "all"), editing: null, lastLiveKey: "" };
+
+  function toast(msg, warn) { $("toast").textContent = msg || ""; $("toast").classList.toggle("warn", !!warn); }
+  async function post(url, body) {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    return r.json().catch(() => ({}));
+  }
+  function mix(a, b, t) {
+    const pa = [1, 3, 5].map(i => parseInt(a.substr(i, 2), 16)), pb = [1, 3, 5].map(i => parseInt(b.substr(i, 2), 16));
+    return `rgb(${pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(",")})`;
+  }
+  const heat = t => t < .5 ? mix("#22385A", "#C9772E", t * 2) : mix("#C9772E", "#E5452B", (t - .5) * 2);
+
+  function gridHTML(view, idp) {
+    if (!view || !view.total) return "";
+    const max = Math.max(1, ...view.cells.map(c => c.n));
+    return view.cells.map(c => {
+      const id = idp ? ` id="${idp}${c.zone}"` : "";
+      if (!c.n) return `<div class="cell"${id}><span class="p">—</span></div>`;
+      const tag = c.ball_pct > 50 ? `<span class="tag ball">壞球 ${c.ball_pct}%</span>` : `<span class="tag strike">好球 ${100 - c.ball_pct}%</span>`;
+      return `<div class="cell"${id} style="background:${heat(c.n / max)}"><span class="p">${c.pct}%</span>${tag}</div>`;
+    }).join("");
+  }
+
+  async function load() {
+    const qs = new URLSearchParams({ player: st.player, pitcher: st.pitcher, scope: st.scope });
+    try {
+      const r = await fetch("/api/dashboard?" + qs);
+      if (!r.ok) throw 0;
+      const d = await r.json();
+      st.data = d; st.status = d.status;
+      if (!st.player && d.player) st.player = d.player.tag;
+      renderStatus(d.status); renderLive(d.live); renderPred(d.predict); renderPlayer(d);
+    } catch { $("dot").classList.remove("live"); $("connText").textContent = "伺服器離線：請重新執行啟動程式"; }
+  }
+
+  function lights(prefix, n, max, cls) {
+    for (let i = 1; i <= max; i++) $(prefix + i).className = "lt" + (n != null && i <= n ? " " + cls : "");
+  }
+
+  function renderStatus(s) {
+    if (!s) return;
+    $("dot").classList.toggle("live", !!s.connected && !s.game_over);
+    $("connText").textContent = !s.connected ? "找不到遊戲視窗" : s.game_over ? "比賽結束・等下一場開始"
+      : "辨識中" + (s.capture_mode === "背景" ? "（背景）" : "");
+    if (s.app_version && s.app_version !== VERSION) toast("後台程式是舊版：請關掉黑色視窗，重新執行啟動程式", true);
+    $("inn").innerHTML = `${s.inning || 1}<small>局${esc(s.half || "上")}</small>`;
+    lights("b", s.balls, 3, "b"); lights("s", s.strikes, 2, "s"); lights("o", s.outs, 2, "o");
+    const top = (s.players || []).filter(p => p.side === "top").map(p => p.id).filter(Boolean).join(" / ");
+    const bot = (s.players || []).filter(p => p.side === "bottom").map(p => p.id).filter(Boolean).join(" / ");
+    const row = s.my_batting_row; // 我方在記分板哪一行
+    const pitchingSide = s.pitching_slot.startsWith("客隊") ? "top" : (s.pitching_slot.startsWith("主隊") ? "bottom" : "");
+    const battingSide = pitchingSide === "top" ? "bottom" : (pitchingSide === "bottom" ? "top" : "");
+    const mine = side => s.row_status === "found" || s.row_mode === "manual" ? (side === row ? "我方" : "對方") : "";
+    $("pitK").textContent = "投球中" + (s.pitching_slot ? `（${s.pitching_slot}${mine(pitchingSide) ? "・" + mine(pitchingSide) : ""}）` : "");
+    $("pitId").textContent = s.pitching_players || "—";
+    $("pitName").textContent = s.pitcher || "—";
+    $("batK").textContent = "打擊中" + (battingSide ? `（${battingSide === "top" ? "客隊" : "主隊"}${mine(battingSide) ? "・" + mine(battingSide) : ""}）` : "");
+    $("batId").textContent = (battingSide === "top" ? top : battingSide === "bottom" ? bot : "") || "—";
+    $("batName").textContent = s.batter || "—";
+    // 設定
+    const auto = s.row_mode === "auto";
+    $("rowAuto").classList.toggle("on", auto);
+    $("rowTop").classList.toggle("on", !auto && row === "top");
+    $("rowBot").classList.toggle("on", !auto && row === "bottom");
+    if (document.activeElement !== $("idInput")) $("idInput").value = s.my_id || "";
+    const side = row === "top" ? "先攻" : "後攻";
+    $("sideText").textContent = !auto ? `手動：我方${side}` : s.row_status === "found" ? `找到 ${s.my_id} → 我方${side}`
+      : s.row_status === "not_found" ? `畫面上找不到 ${s.my_id}，請手動選` : (s.my_id ? `尋找 ${s.my_id} 中…` : "請先輸入 ID");
+  }
+
+  function renderLive(live) {
+    $("liveSub").textContent = live ? `本場・自動跟著目前投手：${live.tag}／${live.pitcher || "投手讀取中"}` : "本場・等對方開始投球";
+    $("lGrid").innerHTML = live && live.total ? gridHTML(live, "lz") : '<div class="empty" style="grid-column:1/-1">這位投手本場還沒有紀錄</div>';
+    decorateLast(live);
+    const rows = (live && live.recent) || [];
+    $("log").innerHTML = rows.length ? rows.slice(0, 20).map(p => {
+      const cnt = p.balls_before != null && p.strikes_before != null ? `${p.balls_before}-${p.strikes_before}` : "?";
+      const edit = st.editing === p.id ? `<tr><td colspan="6"><form class="edit" data-form="${p.id}">
+          <select name="zone" aria-label="落點">${[1,2,3,4,5,6,7,8,9].map(z => `<option${String(z) === String(p.zone) ? " selected" : ""}>${z}</option>`).join("")}</select>
+          <select name="result" aria-label="結果">${Object.entries(RES).map(([k, v]) => `<option value="${k}"${k === p.result ? " selected" : ""}>${v}</option>`).join("")}</select>
+          <input name="raw" value="${esc(p.pitch_raw || "")}" placeholder="球種" aria-label="球種">
+          <button class="btn sm" type="submit">存</button><button class="btn sm" type="button" data-cancel="1">取消</button></form></td></tr>` : "";
+      return `<tr><td>${p.inning}${esc(p.half)}</td><td>${cnt}</td><td>${esc(p.zone)} 號</td><td>${esc(p.pitch_raw || "—")}</td>
+        <td class="r ${esc(p.result)}">${RES[p.result] || esc(p.result)}</td>
+        <td class="x"><button class="ib" data-edit="${p.id}" aria-label="修改">改</button> <button class="ib" data-del="${p.id}" aria-label="刪除">✕</button></td></tr>${edit}`;
+    }).join("") : '<tr><td colspan="6" class="empty">尚無紀錄</td></tr>';
+  }
+
+  // 新一球：準星鎖定動畫（1.5 秒），之後留「上一球」標記。重新繪製時用負的延遲接續播放，不會重頭再跑。
+  const KCOL = { strike: "#FF4D4D", ball: "#3DDC84", foul: "#4EA3FF", in_play: "#4EA3FF" };
+  function decorateLast(live) {
+    const lp = st.lastPitch;
+    if (!lp || !live || lp.tag !== live.tag) return;
+    const cell = $("lz" + lp.zone); if (!cell) return;
+    cell.style.setProperty("--k", KCOL[lp.result] || "#4EA3FF");
+    const el = (performance.now() - lp.t) / 1000;
+    if (el < 1.5) {
+      const d = `animation-delay:-${el.toFixed(2)}s`;
+      cell.insertAdjacentHTML("beforeend", `<span class="c-lock" style="${d}"><i></i><i></i><i></i><i></i></span><span class="c-chip" style="${d}">${RES[lp.result] || ""}${lp.pitch ? "・" + esc(lp.pitch) : ""}</span>`);
+      setTimeout(() => { if (st.data) { $("lGrid").innerHTML = gridHTML(st.data.live, "lz"); decorateLast(st.data.live); } }, Math.max(0, (1.55 - el) * 1000));
+    } else {
+      cell.insertAdjacentHTML("beforeend", `<span class="lastb">● 上一球</span>`);
+    }
+  }
+
+  function renderPred(pr) {
+    const s = st.status || {};
+    $("predSub").textContent = s.balls != null && s.strikes != null ? `${s.balls} 壞 ${s.strikes} 好時` : "";
+    const rank = {};
+    ((pr && pr.zones) || []).forEach((z, i) => { rank[z.zone] = { i: i + 1, z }; });
+    $("mini").innerHTML = [1,2,3,4,5,6,7,8,9].map(n => {
+      const r = rank[String(n)];
+      return r ? `<div class="r${r.i}"><span class="p">${r.z.pct}%</span><span class="t">壞球 ${r.z.ball_pct}%</span></div>` : "<div></div>";
+    }).join("");
+    const types = (pr && pr.types) || [];
+    $("predTypes").innerHTML = types.map((t, i) => `<span class="chip${i === 0 ? " top" : ""}">${esc(t.name)} ${t.pct}%</span>`).join("");
+    $("predNote").textContent = !pr ? "等對方開始投球" : !pr.n ? "這位玩家還沒有資料" : (pr.n < 8 ? `資料還很少（${pr.n} 球），僅供參考` : "");
+    const ag = pr && pr.accuracy_game, ap = pr && pr.accuracy_player;
+    $("accText").textContent = ag && ag.n ? `預測命中率（本場 ${ag.n} 球）：第一名 ${ag.top1}%・前三名 ${ag.top3}%` + (ap && ap.n ? `；這位玩家全部 ${ap.n} 球：第一名 ${ap.top1}%・前三名 ${ap.top3}%` : "") : "預測命中率：尚無資料";
+  }
+
+  function renderPlayer(d) {
+    const s = d.status || {}, v = d.player;
+    const slots = s.players || [];
+    $("slots").innerHTML = slots.map(p => `<button class="slot${p.id && p.id === st.player ? " on" : ""}" data-pl="${esc(p.id)}"${p.id ? "" : " disabled"}>
+      <span class="s">${esc(p.slot)}${p.me ? "・我" : ""}</span><span class="i">${esc(p.id || "讀取中…")}</span></button>`).join("");
+    const inSlots = new Set(slots.map(p => p.id).filter(Boolean));
+    const others = (d.known_players || []).filter(k => !inSlots.has(k.id));
+    $("otherSel").innerHTML = `<option value="">其他玩家（以前遇過）…</option>` + others.map(k => `<option value="${esc(k.id)}"${k.id === st.player ? " selected" : ""}>${esc(k.id)}・${k.n} 球</option>`).join("");
+    $("otherSel").hidden = !others.length;
+    $("vCur").classList.toggle("on", st.scope === "current"); $("vAll").classList.toggle("on", st.scope !== "current");
+    if (!v) { $("pchips").innerHTML = ""; $("pGrid").innerHTML = '<div class="empty" style="grid-column:1/-1">還沒有玩家資料</div>'; $("pTypes").innerHTML = ""; $("pSum").textContent = ""; return; }
+    const ps = (v.pitchers || []).slice(0, 8);
+    $("pchips").innerHTML = `<button class="pchip${st.pitcher === "all" ? " on" : ""}" data-pi="all">全部投手</button>` +
+      ps.map(p => `<button class="pchip${p.name === st.pitcher ? " on" : ""}" data-pi="${esc(p.name)}">${esc(p.name || "未知投手")}</button>`).join("");
+    $("pGrid").innerHTML = v.total ? gridHTML(v) : '<div class="empty" style="grid-column:1/-1">這個範圍沒有紀錄</div>';
+    $("pTypes").innerHTML = (v.types || []).slice(0, 5).map(t => `<span class="chip lite">${esc(t.name)} <b>${t.pct}%</b></span>`).join("");
+    $("pSum").textContent = `${v.tag}・${st.pitcher === "all" ? "全部投手" : st.pitcher}・${st.scope === "current" ? "本場" : v.games + " 場"} ${v.total} 球`;
+  }
+
+  // 事件
+  $("slots").onclick = e => { const b = e.target.closest("[data-pl]"); if (!b || !b.dataset.pl) return; st.player = b.dataset.pl; st.pitcher = "all"; load(); };
+  $("otherSel").onchange = e => { if (!e.target.value) return; st.player = e.target.value; st.pitcher = "all"; load(); };
+  $("pchips").onclick = e => { const b = e.target.closest("[data-pi]"); if (!b) return; st.pitcher = b.dataset.pi; load(); };
+  $("vCur").onclick = () => { st.scope = "current"; ls.set("bbo-pscope", "current"); load(); };
+  $("vAll").onclick = () => { st.scope = "all"; ls.set("bbo-pscope", "all"); load(); };
+  $("setBtn").onclick = () => { const h = !$("settings").hidden; $("settings").hidden = h; $("setBtn").setAttribute("aria-expanded", String(!h)); };
+  $("setClose").onclick = () => { $("settings").hidden = true; $("setBtn").setAttribute("aria-expanded", "false"); };
+  $("idForm").onsubmit = async e => { e.preventDefault(); await post("/api/settings", { my_id: $("idInput").value.trim() }); toast("已更新 ID，重新判斷先攻／後攻"); load(); };
+  $("rowAuto").onclick = async () => { await post("/api/settings", { row_auto: true }); load(); };
+  $("rowTop").onclick = async () => { await post("/api/settings", { my_batting_row: "top" }); load(); };
+  $("rowBot").onclick = async () => { await post("/api/settings", { my_batting_row: "bottom" }); load(); };
+  $("newGame").onclick = async () => { await post("/api/settings", { new_game: true }); toast("已開始新的一場"); load(); };
+  $("exportBtn").onclick = () => { location.href = "/api/export.csv?scope=all"; };
+  $("undoBtn").onclick = async () => {
+    const r = await fetch("/api/undo?scope=current", { method: "POST" }); const d = await r.json().catch(() => ({}));
+    toast(d.ok ? `已撤銷 #${d.deleted.id}` : (d.message || "沒有可撤銷的紀錄"), !d.ok); load();
+  };
+  $("log").addEventListener("click", async e => {
+    const ed = e.target.closest("[data-edit]"); if (ed) { st.editing = Number(ed.dataset.edit); renderLive(st.data && st.data.live); return; }
+    if (e.target.closest("[data-cancel]")) { st.editing = null; renderLive(st.data && st.data.live); return; }
+    const del = e.target.closest("[data-del]");
+    if (del) { await fetch(`/api/pitches/${del.dataset.del}`, { method: "DELETE" }); toast(`已刪除 #${del.dataset.del}`); load(); }
+  });
+  $("log").addEventListener("submit", async e => {
+    const f = e.target.closest("[data-form]"); if (!f) return; e.preventDefault();
+    await fetch(`/api/pitches/${f.dataset.form}`, { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ zone: f.zone.value, result: f.result.value, pitch_raw: f.raw.value.trim() || null }) });
+    st.editing = null; toast(`已修正 #${f.dataset.form}`); load();
+  });
+
+  // 即時推播
+  function ws() {
+    const w = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
+    w.onmessage = ev => {
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.status) {
+          const p = st.status, s = m.status;
+          st.status = s; renderStatus(s);
+          if (!p || p.balls !== s.balls || p.strikes !== s.strikes || p.pitcher !== s.pitcher || p.pitching_players !== s.pitching_players
+              || JSON.stringify(p.players) !== JSON.stringify(s.players) || p.game_id !== s.game_id) load();
+        }
+        if (m.type === "pitch" && m.payload) {
+          const p = m.payload;
+          st.lastPitch = { zone: String(p.zone), result: p.result, pitch: p.pitch_raw || "", tag: p.opponent_tag, t: performance.now() };
+          if (st.data && st.data.live) { $("lGrid").innerHTML = gridHTML(st.data.live, "lz"); decorateLast(st.data.live); }
+        }
+        if (m.type !== "status" && m.type !== "hello") load();
+      } catch {}
+    };
+    w.onclose = () => setTimeout(ws, 2500);
+  }
+  // 自動更新：開網頁時檢查一次，之後每 30 分鐘
+  async function checkUpdate() {
+    try {
+      const d = await (await fetch("/api/update/check")).json();
+      if (d.available) { $("updText").textContent = `有新版本 ${d.remote}${d.notes ? "：" + d.notes : ""}（紀錄和設定不會動）`; $("upd").hidden = false; }
+    } catch {}
+  }
+  $("updBtn").onclick = async () => {
+    $("updBtn").disabled = true; $("updText").textContent = "下載更新中…請不要關掉黑色視窗";
+    try {
+      const d = await (await fetch("/api/update/apply", { method: "POST" })).json();
+      if (d.ok) { $("updText").textContent = "更新完成，程式重新啟動中（約 20 秒），網頁會自動重新整理"; setTimeout(() => location.reload(), 20000); }
+      else { $("updText").textContent = "更新失敗：" + (d.log || []).join(" / "); $("updBtn").disabled = false; }
+    } catch { $("updText").textContent = "程式重新啟動中…"; setTimeout(() => location.reload(), 20000); }
+  };
+  checkUpdate(); setInterval(checkUpdate, 30 * 60 * 1000);
+  load(); ws();
+})();
+</script>
+</body>
+</html>
