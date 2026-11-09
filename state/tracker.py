@@ -22,12 +22,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import cv2
 import numpy as np
 
 from capture.calibration import CalibrationConfig
 from detect.cursor import has_batting_cursor, is_batting_camera
 from detect.markers import MarkerDetection, detect_pitch_marker, detect_label_only, imwrite_unicode
 from detect.scoreboard import ScoreboardState, read_scoreboard
+from detect.environment import read_environment, wind_speed_crop
 from detect.gameover import has_confirm_box_button
 from ocr.engine import BBOOCREngine
 from ocr.phash import classify_pitch_group, levenshtein_distance
@@ -68,7 +70,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10d"
+APP_VERSION = "2026-11-10e"
 
 
 @dataclass
@@ -104,6 +106,8 @@ class TrackerStatus:
     pitching_slot: str = ""  # 例如「主隊1・單數局」
     players: List[Dict[str, Any]] = field(default_factory=list)  # 四個（或兩個）玩家欄位
     audit: Dict[str, int] = field(default_factory=dict)  # 記分板審核：核對／改正／補漏記
+    env: Dict[str, Any] = field(default_factory=dict)  # 天氣、風、卡片天氣屬性
+    cpu_pct: float = 0.0  # 程式佔整台電腦 CPU 的比例
 
 
 def _norm_id(text: str) -> str:
@@ -229,6 +233,11 @@ class GameSessionTracker:
         # 兩邊各自目前的投手（換邊時先切回那一邊上次的投手，再等 OCR 確認）
         self._pitcher_by_side: Dict[str, str] = {}
         self._pitch_inning: int = 1
+        # 比賽環境：球場天氣、風、投手／打者卡片天氣屬性（每一球一起記）
+        self.env: Dict[str, Any] = {"weather": "", "wind_dir": "", "wind_angle": None, "wind_speed": None,
+                                    "pitcher_attr": "", "batter_attr": ""}
+        self._wind_hash = None
+        self._name_counts: Optional[Dict[str, int]] = None
         self._force_teams: bool = True
         self._force_names: bool = False
         self.outs: int = 0
@@ -331,6 +340,78 @@ class GameSessionTracker:
         self._force_teams = True
 
     _RESULT_NAME = {"foul": "界外", "in_play": "擊出", "strike": "好球", "ball": "壞球"}
+
+    def _canon_pitcher(self, name: str) -> str:
+        """
+        投手名錯字／截斷校正：跟以前讀過的名字比對（同背號優先）。
+        例：「89 J.史」→「89 J.史莫滋」（被截斷）、「97 賀錦能」→「97 賀錦龍」（錯字，以出現較多次的為準）。
+        """
+        import difflib
+        name = re.sub(r"\s+", " ", (name or "").strip())
+        if not name:
+            return name
+        if self._name_counts is None:
+            try:
+                self._name_counts = dict(self.store.pitcher_name_counts())
+            except Exception:
+                self._name_counts = {}
+        counts = self._name_counts
+
+        def split(n):
+            m = re.match(r"^(\d{1,3})\s*(.*)$", n)
+            return (m.group(1), m.group(2)) if m else ("", n)
+
+        num, rest = split(name)
+        best, best_key = None, None
+        for cand, cnt in counts.items():
+            if cand == name or cnt < 2:
+                continue
+            cnum, crest = split(cand)
+            if num and cnum != num:
+                continue
+            if not rest or not crest:
+                continue
+            if crest.startswith(rest) and len(crest) > len(rest):
+                score = 1.0  # 被截斷
+            else:
+                score = difflib.SequenceMatcher(None, rest, crest).ratio()
+            if score < 0.6 or (len(rest) >= 3 and score < 0.66):
+                continue
+            key = (score, cnt)
+            if best_key is None or key > best_key:
+                best, best_key = cand, key
+        out = name
+        if best and counts.get(best, 0) >= counts.get(name, 0):
+            out = best
+        counts[out] = counts.get(out, 0) + 1
+        return out
+
+    def _read_env(self, img: np.ndarray) -> None:
+        """讀天氣、風向、卡片天氣（純顏色判斷，很快）；風速數字有變才丟給 OCR。"""
+        try:
+            e = read_environment(img)
+        except Exception:
+            return
+        for k in ("weather", "wind_dir", "pitcher_attr", "batter_attr"):
+            if e.get(k):
+                self.env[k] = e[k]
+        if e.get("wind_angle") is not None:
+            self.env["wind_angle"] = e["wind_angle"]
+        crop = wind_speed_crop(img)
+        if crop.size:
+            small = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (16, 8), interpolation=cv2.INTER_AREA)
+            h = (small > small.mean()).tobytes()
+            if h != self._wind_hash:
+                if self._submit("wind", self._ocr_wind_speed, crop.copy()):
+                    self._wind_hash = h
+
+    def _ocr_wind_speed(self, crop: np.ndarray) -> Optional[int]:
+        try:
+            lines = self.ocr_engine.run_ocr_lines(crop, upscale=3.0)
+        except Exception:
+            return None
+        m = re.search(r"(\d{1,2})", " ".join(lines or []))
+        return int(m.group(1)) if m else None
 
     def _check_missed(self, cur: Tuple[int, int], ts: float, det_seen: bool) -> bool:
         """
@@ -750,6 +831,8 @@ class GameSessionTracker:
             pitching_slot=pslot,
             players=self.player_slots(),
             audit=dict(self.audit),
+            env=dict(self.env),
+            cpu_pct=getattr(self, "cpu_pct", 0.0),
         )
 
     @staticmethod
@@ -937,7 +1020,11 @@ class GameSessionTracker:
                 self.active_batting_row = "unknown"
 
         # 2. Detect stationary pitch marker (◎ bullseye or ⊗ red_x)
-        det = detect_pitch_marker(client_bgr, self.config)
+        # 輕量化：不是打擊畫面（超過 1 秒）又沒有正在處理的球時，不找落點標記
+        if cam_ok or self._pending is not None:
+            det = detect_pitch_marker(client_bgr, self.config)
+        else:
+            det = None
         if det is None and sb.valid and cam_ok:
             # 低球補救：落點標記被結果標籤蓋住時，改用標籤位置推回落點
             det = detect_label_only(client_bgr, self.config)
@@ -965,6 +1052,8 @@ class GameSessionTracker:
         done, res = self._take("info")
         if done and res:
             new_batter, new_pitcher = res
+            if new_pitcher:
+                new_pitcher = self._canon_pitcher(new_pitcher)
             # 剛攻守交換時右下角有時還是上半局的名字：讀到的投手是「正在打擊那一隊」的投手 → 舊畫面，不採用
             bat_row = self.stable_batting_row
             if (
@@ -994,6 +1083,12 @@ class GameSessionTracker:
 
         # 只在「打擊畫面＋記分板正常」時讀：守備畫面、過場時右下角是別的東西，
         # 以前會對著紅土或小地圖一直跑 OCR，每次卡住好幾秒
+        if sb.valid and batting_cam and self._frame_idx % 15 == 7:
+            self._read_env(client_bgr)
+        done, ws = self._take("wind")
+        if done and ws is not None:
+            self.env["wind_speed"] = ws
+
         if sb.valid and batting_cam and self._frame_idx % 8 == 1:
             cb = client_bgr.copy()
             self._submit("info", self.ocr_engine.read_info_panel, cb, self.config, force=self._force_names)
@@ -1363,6 +1458,7 @@ class GameSessionTracker:
             "speed_kmh": speed_kmh,
             "note": note_str,
             "snapshot": f"/snapshots/{snap_name}",
+            **{k: self.env.get(k) for k in ("weather", "wind_dir", "wind_angle", "wind_speed", "pitcher_attr", "batter_attr")},
         }
         pitch_id = self.store.insert_pitch(record)
         self._pitches_this_game += 1

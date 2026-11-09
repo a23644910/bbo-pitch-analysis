@@ -165,6 +165,7 @@ td.x{text-align:right;white-space:nowrap}
       <span class="sub" id="sideText"></span>
     </div>
     <div class="row sub" id="accText">預測命中率：尚無資料</div>
+    <div class="row sub" id="perfText"></div>
     <div class="row">
       <button class="btn sm" id="undoBtn">撤銷上一球</button>
       <button class="btn sm" id="exportBtn">匯出 CSV</button>
@@ -187,6 +188,7 @@ td.x{text-align:right;white-space:nowrap}
           <div><span class="k" id="pitK">投球中</span><span class="id" id="pitId">—</span><span id="pitName">—</span></div>
           <div><span class="k" id="batK">打擊中</span><span class="id" id="batId">—</span><span id="batName">—</span></div>
         </div>
+        <div class="sub" id="envText"></div>
       </section>
 
       <section class="card hl" aria-label="下一球參考">
@@ -234,7 +236,7 @@ td.x{text-align:right;white-space:nowrap}
 
 <script>
 (() => {
-  const VERSION = "2026-11-10d";
+  const VERSION = "2026-11-10e";
   const $ = id => document.getElementById(id);
   const RES = { strike: "好球", ball: "壞球", foul: "界外", in_play: "擊出" };
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -300,6 +302,13 @@ td.x{text-align:right;white-space:nowrap}
     $("batK").textContent = "打擊中" + (battingSide ? `（${battingSide === "top" ? "客隊" : "主隊"}${mine(battingSide) ? "・" + mine(battingSide) : ""}）` : "");
     $("batId").textContent = (battingSide === "top" ? top : battingSide === "bottom" ? bot : "") || "—";
     $("batName").textContent = s.batter || "—";
+    const e = s.env || {};
+    const envParts = [];
+    if (e.weather) envParts.push(`球場 ${e.weather}`);
+    if (e.wind_dir || e.wind_speed != null) envParts.push(`風 ${e.wind_dir || ""}${e.wind_speed != null ? " " + e.wind_speed + "m" : ""}`);
+    if (e.pitcher_attr || e.batter_attr) envParts.push(`投手卡 ${e.pitcher_attr || "?"}・打者卡 ${e.batter_attr || "?"}`);
+    $("envText").textContent = envParts.join("　");
+    $("perfText").textContent = s.connected ? `程式效能：每秒 ${Math.round(s.fps || 0)} 張・CPU 用量 ${s.cpu_pct ?? "-"}%（佔整台電腦）` : "";
     // 設定
     const auto = s.row_mode === "auto";
     $("rowAuto").classList.toggle("on", auto);

@@ -77,12 +77,24 @@ class PitchStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
         self._migrate_out_of_zone()
+        self._add_env_columns()
 
     @staticmethod
     def _grid_from_xy(x: float, y: float) -> str:
         x = min(max(float(x), 0.0), 0.9999)
         y = min(max(float(y), 0.0), 0.9999)
         return str(int(y * 3) * 3 + int(x * 3) + 1)
+
+    ENV_COLUMNS = ("weather", "wind_dir", "wind_angle", "wind_speed", "pitcher_attr", "batter_attr")
+
+    def _add_env_columns(self) -> None:
+        """比賽環境欄位（天氣、風、卡片天氣屬性），舊資料庫自動補上。"""
+        with self._connect() as conn:
+            have = {r[1] for r in conn.execute("PRAGMA table_info(pitches)").fetchall()}
+            for col in self.ENV_COLUMNS:
+                if col not in have:
+                    typ = "INTEGER" if col in ("wind_angle", "wind_speed") else "TEXT"
+                    conn.execute(f"ALTER TABLE pitches ADD COLUMN {col} {typ}")
 
     def _migrate_out_of_zone(self) -> None:
         """舊紀錄的框外代號（H / L / IN / OUT…）改成沿格線延伸後的九宮格號碼。"""
@@ -296,7 +308,14 @@ class PitchStore:
                     str(record.get("snapshot", "")),
                 ),
             )
-            return int(cur.lastrowid)
+            pid = int(cur.lastrowid)
+            env = {k: record.get(k) for k in self.ENV_COLUMNS if record.get(k) not in (None, "")}
+            if env:
+                conn.execute(
+                    f"UPDATE pitches SET {', '.join(k + ' = ?' for k in env)} WHERE id = ?",
+                    list(env.values()) + [pid],
+                )
+            return pid
 
     def update_pitch(
         self,
@@ -785,7 +804,13 @@ def _store_methods():
         return {"n": n, "top1": round((r["h1"] or 0) * 100.0 / n) if n else None,
                 "top3": round((r["h3"] or 0) * 100.0 / n) if n else None}
 
-    for f in (player_view, known_players, predict, score_prediction, prediction_accuracy):
+    def pitcher_name_counts(self) -> Dict[str, int]:
+        with self._connect() as conn:
+            return {r[0]: r[1] for r in conn.execute(
+                "SELECT pitcher, COUNT(*) FROM pitches WHERE pitcher != '' AND pitcher != '未知投手' GROUP BY pitcher"
+            ).fetchall()}
+
+    for f in (pitcher_name_counts, player_view, known_players, predict, score_prediction, prediction_accuracy):
         setattr(PitchStore, f.__name__, f)
 
 

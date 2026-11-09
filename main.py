@@ -93,6 +93,7 @@ def run_live_capture_loop(
     bg_capture = BackgroundCapture()
     warned_aspect = False
     idle_since = None
+    cpu_t0 = time.process_time()
     last_win_log = 0.0
 
     while stop_event is None or not stop_event.is_set():
@@ -198,6 +199,10 @@ def run_live_capture_loop(
         now = time.perf_counter()
         if now - fps_t0 >= 1.0:
             tracker.fps = fps_counter / (now - fps_t0)
+            # 程式佔整台電腦 CPU 的比例（所有執行緒加總，含文字辨識）
+            cpu_now = time.process_time()
+            tracker.cpu_pct = round((cpu_now - cpu_t0) / (now - fps_t0) / (os.cpu_count() or 1) * 100.0, 1)
+            cpu_t0 = cpu_now
             fps_counter = 0
             fps_t0 = now
             bridge.notify_from_thread("status")
