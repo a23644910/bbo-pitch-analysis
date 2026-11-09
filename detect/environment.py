@@ -106,8 +106,23 @@ def read_wind_arrow(arrow_bgr: np.ndarray) -> Tuple[Optional[int], str]:
             best, best_iou = ang, iou
     if best is None:
         return None, ""
-    names = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]  # 畫面上箭頭的方向（實際對打擊的影響之後用資料分析）
-    return int(best), names[int(((best + 22.5) % 360) // 45)]
+    return int(best), wind_label(int(best))
+
+
+def wind_label(ang: int) -> str:
+    """
+    畫面是從本壘看向外野：箭頭往上（往外野吹）＝順風，往下（吹向本壘）＝逆風，左右＝側風。
+    風速 5 以上（含）的順風＝大順風（由網頁／分析依 wind_speed 判斷）。
+    """
+    arrows = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
+    a = arrows[int(((ang + 22.5) % 360) // 45)]
+    if ang <= 67 or ang >= 293:
+        kind = "順風"
+    elif 113 <= ang <= 247:
+        kind = "逆風"
+    else:
+        kind = "側風"
+    return a + kind
 
 
 def classify_card_icon(img: np.ndarray, center) -> str:
@@ -173,3 +188,35 @@ def wind_speed_crop(img: np.ndarray) -> np.ndarray:
         return box
     h, w = box.shape[:2]
     return box[int(h * 0.55):, int(w * 0.40):]
+
+
+ENERGY_BAR = (0.435, 0.380, 0.552, 0.412)  # 投手頭上的能量條（藍色＝目前能量）
+
+
+def read_energy(img: np.ndarray) -> Optional[float]:
+    """
+    投手頭上的能量條 → 0.0～1.0；畫面上沒有能量條時回傳 None。
+    藍色部分＝已累積的能量，深色部分＝空的。
+    """
+    c = _crop(img, ENERGY_BAR)
+    if c.size == 0:
+        return None
+    hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+    blue = (hsv[..., 0] >= 95) & (hsv[..., 0] <= 120) & (hsv[..., 1] > 120) & (hsv[..., 2] > 150)
+    dark = hsv[..., 2] < 70
+    rows = np.where((blue | dark).mean(axis=1) > 0.45)[0]
+    if rows.size < 3:
+        return None
+    r1, r2 = rows.min(), rows.max() + 1
+    band_blue = blue[r1:r2].mean(axis=0) > 0.5
+    band_bar = (blue[r1:r2] | dark[r1:r2]).mean(axis=0) > 0.5
+    cols = np.where(band_bar)[0]
+    if cols.size < c.shape[1] * 0.5:
+        return None
+    bcols = np.where(band_blue)[0]
+    if bcols.size < 3:
+        return None  # 沒有藍色：可能是能量 0，也可能根本沒有能量條（背景很暗），一律當作讀不到
+    x0, x1 = bcols.min(), cols.max()
+    if x1 <= x0:
+        return None
+    return round(float(min(1.0, (bcols.max() - x0 + 1) / (x1 - x0 + 1))), 2)

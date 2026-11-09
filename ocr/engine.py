@@ -269,6 +269,20 @@ class BBOOCREngine:
                 return f"{year} {name}"
         return ""
 
+    @staticmethod
+    def _has_name_bar(panel: np.ndarray) -> bool:
+        ph, pw = panel.shape[:2]
+        hsv = cv2.cvtColor(panel, cv2.COLOR_BGR2HSV)
+        colored = (hsv[..., 1] > 90) & (hsv[..., 2] > 70)
+        for x1, x2 in ((0.0, 0.48), (0.52, 1.0)):
+            half = colored[:, int(pw * x1):int(pw * x2)]
+            rows = np.where(half.mean(axis=1) > 0.5)[0]
+            in_band = ((rows >= ph * 0.35) & (rows <= ph * 0.68)).sum()   # 名字色條的位置
+            above = (rows < ph * 0.33).sum()                               # 上方被 TAB 大頭像蓋住時會很多
+            if in_band >= max(4, int(ph * 0.10)) and above <= int(ph * 0.15):
+                return True
+        return False
+
     def read_info_panel(
         self, client_bgr: np.ndarray, config: CalibrationConfig, force: bool = False
     ) -> Tuple[str, str]:
@@ -282,12 +296,11 @@ class BBOOCREngine:
             return self._last_batter_name, self._last_pitcher_name
 
         ph, pw = panel.shape[:2]
-        # Verify the crimson-red name bar is visible (and not covered by the taller TAB portrait)
-        r_minus_b_rows = np.mean(
-            panel[:, :, 2].astype(float) - panel[:, :, 0].astype(float), axis=1
-        )
-        red_rows = np.where(r_minus_b_rows > 25.0)[0]
-        if red_rows.size < max(6, int(ph * 0.12)) or red_rows.size > int(ph * 0.42):
+        # 確認名字色條有出現（沒被 TAB 的大頭像蓋住）。
+        # 色條顏色依卡片而不同（紅、藍、紫、金），而且打者、投手兩條左右並排、顏色可能不同；
+        # 以前把整列平均算「紅減藍」，打者藍條＋投手紅條會互相抵消 → 後攻那半局永遠讀不到名字。
+        # 改成左右兩半各自看「高彩度」的列，任一邊有色條就算。
+        if not self._has_name_bar(panel):
             return self._last_batter_name, self._last_pitcher_name
 
         # Use fixed normalized vertical bounds (0.39..0.63) so 1px video compression jitter

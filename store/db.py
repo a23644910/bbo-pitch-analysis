@@ -85,7 +85,7 @@ class PitchStore:
         y = min(max(float(y), 0.0), 0.9999)
         return str(int(y * 3) * 3 + int(x * 3) + 1)
 
-    ENV_COLUMNS = ("weather", "wind_dir", "wind_angle", "wind_speed", "pitcher_attr", "batter_attr")
+    ENV_COLUMNS = ("weather", "wind_dir", "wind_angle", "wind_speed", "pitcher_attr", "batter_attr", "energy")
 
     def _add_env_columns(self) -> None:
         """比賽環境欄位（天氣、風、卡片天氣屬性），舊資料庫自動補上。"""
@@ -93,7 +93,7 @@ class PitchStore:
             have = {r[1] for r in conn.execute("PRAGMA table_info(pitches)").fetchall()}
             for col in self.ENV_COLUMNS:
                 if col not in have:
-                    typ = "INTEGER" if col in ("wind_angle", "wind_speed") else "TEXT"
+                    typ = "INTEGER" if col in ("wind_angle", "wind_speed") else ("REAL" if col == "energy" else "TEXT")
                     conn.execute(f"ALTER TABLE pitches ADD COLUMN {col} {typ}")
 
     def _migrate_out_of_zone(self) -> None:

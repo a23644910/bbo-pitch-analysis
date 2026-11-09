@@ -29,7 +29,7 @@ from capture.calibration import CalibrationConfig
 from detect.cursor import has_batting_cursor, is_batting_camera
 from detect.markers import MarkerDetection, detect_pitch_marker, detect_label_only, imwrite_unicode
 from detect.scoreboard import ScoreboardState, read_scoreboard
-from detect.environment import read_environment, wind_speed_crop
+from detect.environment import read_environment, read_energy, wind_speed_crop
 from detect.gameover import has_confirm_box_button
 from ocr.engine import BBOOCREngine
 from ocr.phash import classify_pitch_group, levenshtein_distance
@@ -70,7 +70,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10e"
+APP_VERSION = "2026-11-10f"
 
 
 @dataclass
@@ -237,6 +237,7 @@ class GameSessionTracker:
         self.env: Dict[str, Any] = {"weather": "", "wind_dir": "", "wind_angle": None, "wind_speed": None,
                                     "pitcher_attr": "", "batter_attr": ""}
         self._wind_hash = None
+        self._energy: Optional[Tuple[float, float]] = None  # (能量 0~1, 讀到的時間)
         self._name_counts: Optional[Dict[str, int]] = None
         self._force_teams: bool = True
         self._force_names: bool = False
@@ -1085,6 +1086,12 @@ class GameSessionTracker:
         # 以前會對著紅土或小地圖一直跑 OCR，每次卡住好幾秒
         if sb.valid and batting_cam and self._frame_idx % 15 == 7:
             self._read_env(client_bgr)
+        # 投手頭上的能量條只在投球前短暫出現：打擊畫面、還沒投出時每 3 張看一次
+        if batting_cam and self._pending is None and self._frame_idx % 3 == 0:
+            en = read_energy(client_bgr)
+            if en is not None:
+                self._energy = (en, ts_sec)
+                self.env["energy"] = en
         done, ws = self._take("wind")
         if done and ws is not None:
             self.env["wind_speed"] = ws
@@ -1459,6 +1466,8 @@ class GameSessionTracker:
             "note": note_str,
             "snapshot": f"/snapshots/{snap_name}",
             **{k: self.env.get(k) for k in ("weather", "wind_dir", "wind_angle", "wind_speed", "pitcher_attr", "batter_attr")},
+            # 能量：這球投出前 10 秒內讀到的才算（每一球前能量條都會重新出現）
+            "energy": self._energy[0] if self._energy and (ts_sec - self._energy[1]) < 10.0 else None,
         }
         pitch_id = self.store.insert_pitch(record)
         self._pitches_this_game += 1

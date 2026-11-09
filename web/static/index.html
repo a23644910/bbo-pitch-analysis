@@ -236,7 +236,7 @@ td.x{text-align:right;white-space:nowrap}
 
 <script>
 (() => {
-  const VERSION = "2026-11-10e";
+  const VERSION = "2026-11-10f";
   const $ = id => document.getElementById(id);
   const RES = { strike: "好球", ball: "壞球", foul: "界外", in_play: "擊出" };
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -305,7 +305,11 @@ td.x{text-align:right;white-space:nowrap}
     const e = s.env || {};
     const envParts = [];
     if (e.weather) envParts.push(`球場 ${e.weather}`);
-    if (e.wind_dir || e.wind_speed != null) envParts.push(`風 ${e.wind_dir || ""}${e.wind_speed != null ? " " + e.wind_speed + "m" : ""}`);
+    if (e.wind_dir || e.wind_speed != null) {
+      const big = (e.wind_dir || "").includes("順風") && e.wind_speed >= 5;
+      envParts.push(`風 ${big ? (e.wind_dir || "").replace("順風", "大順風") : (e.wind_dir || "")}${e.wind_speed != null ? " " + e.wind_speed + "m" : ""}`);
+    }
+    if (e.energy != null) envParts.push(`投手能量 ${Math.round(e.energy * 100)}%`);
     if (e.pitcher_attr || e.batter_attr) envParts.push(`投手卡 ${e.pitcher_attr || "?"}・打者卡 ${e.batter_attr || "?"}`);
     $("envText").textContent = envParts.join("　");
     $("perfText").textContent = s.connected ? `程式效能：每秒 ${Math.round(s.fps || 0)} 張・CPU 用量 ${s.cpu_pct ?? "-"}%（佔整台電腦）` : "";
