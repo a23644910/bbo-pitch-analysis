@@ -231,7 +231,10 @@ def create_app(
             live["pitcher"] = st.pitcher
         pred = None
         if cur_tag:
-            pred = store.predict(cur_tag, st.pitcher, st.balls, st.strikes)
+            env = dict(getattr(tracker, "env", {}) or {})
+            ctx = {"game_id": tracker.game_id, "outs": st.outs, **env}
+            pred = store.predict(cur_tag, st.pitcher, st.balls, st.strikes, ctx=ctx)
+            pred["model"] = store.model_meta()
             pred["accuracy_game"] = store.prediction_accuracy(game_id=tracker.game_id)
             pred["accuracy_player"] = store.prediction_accuracy(opponent_tag=cur_tag)
         known = store.known_players()

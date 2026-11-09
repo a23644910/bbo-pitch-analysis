@@ -16,6 +16,7 @@ from ocr.phash import classify_pitch_group, hamming_distance
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "bbo_pitches.db"
+MODEL_PATH = Path(__file__).resolve().parent.parent / "data" / "zone_model"
 
 ZONE_LABELS_ZH = {
     "1": "左上(1)",
@@ -699,8 +700,49 @@ def _store_methods():
                 "SELECT opponent_tag AS id, COUNT(*) n, MAX(ts) last FROM pitches WHERE opponent_tag != '' GROUP BY opponent_tag ORDER BY last DESC"
             ).fetchall()]
 
+    def _model_rows(self, before_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        where, params = ["opponent_tag != ''", "opponent_tag != '對手1'", "zone != '0'"], []
+        if before_id is not None:
+            where.append("id < ?"); params.append(before_id)
+        return list(reversed(_rows(self, " AND ".join(where), params)))
+
+    def retrain_model(self) -> Dict[str, Any]:
+        """用全部歷史資料重訓下一球預測 AI（約 0.2 秒）；回測贏過統計算法才啟用。"""
+        from predict.model import train_and_save
+        meta = train_and_save(self._model_rows(), MODEL_PATH)
+        self._model_cache = None
+        print(f"  [預測 AI] {meta.get('reason')}（回測：AI 前三 {meta.get('ai_top3', '-')}%／統計 {meta.get('stats_top3', '-')}%）", flush=True)
+        return meta
+
+    def model_meta(self) -> Dict[str, Any]:
+        try:
+            return json.loads(MODEL_PATH.with_suffix(".json").read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _model_and_states(self, before_id: Optional[int]):
+        """回傳 (模型, 各玩家統計)。即時預測時快取，資料有變才重算。"""
+        from predict.model import load, player_states
+        cache = getattr(self, "_model_cache", None)
+        if cache is None:
+            m = load(MODEL_PATH)
+            cache = {"model": m, "key": None, "states": None}
+            self._model_cache = cache
+        m = cache["model"]
+        if m is None or not m.active:
+            return None, None
+        if before_id is not None:
+            return m, player_states(self._model_rows(before_id))
+        with self._connect() as conn:
+            key = tuple(conn.execute("SELECT COUNT(*), MAX(id), TOTAL(LENGTH(zone)) FROM pitches").fetchone())
+        if cache["key"] != key:
+            cache["states"] = player_states(self._model_rows())
+            cache["key"] = key
+        return m, cache["states"]
+
     def predict(self, opponent_tag: str, pitcher: str, balls: Optional[int], strikes: Optional[int],
-                before_id: Optional[int] = None, min_sample: int = 8) -> Dict[str, Any]:
+                before_id: Optional[int] = None, min_sample: int = 8,
+                ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         下一球預測（只分玩家，不分投手）：
         把「這位玩家全部」「同球數情境（領先/平手/落後/兩好球）」「完全同球數」三種統計加權混合，
@@ -754,6 +796,20 @@ def _store_methods():
             if n:
                 for z in Z:
                     score[z] += (n / (n + k)) * tr.get(z, 0) / n
+        method = "統計"
+        if hist:
+            try:
+                model, states = self._model_and_states(before_id)
+                if model is not None:
+                    c = dict(ctx or {})
+                    c.update({"opponent_tag": opponent_tag, "balls_before": balls, "strikes_before": strikes})
+                    if "game_id" not in c:
+                        c["game_id"] = cur_game
+                    probs = model.predict(c, states)
+                    score = {z: float(probs[i]) for i, z in enumerate(Z)}
+                    method = "AI"
+            except Exception as e:
+                print(f"  [預測 AI 錯誤] {e}", flush=True)
         tot = sum(score.values())
         zones = []
         for z in sorted(Z, key=lambda z: -score[z])[:3]:
@@ -769,7 +825,7 @@ def _store_methods():
         tpool = comps[1] if len([h for h in comps[1] if h.get("pitch_raw")]) >= 5 else hist
         g = _grid_and_types(tpool)
         return {"level": "這位玩家", "n": len(hist), "zones": zones if hist else [], "types": g["types"][:3],
-                "balls": balls, "strikes": strikes}
+                "balls": balls, "strikes": strikes, "method": method}
 
     def score_prediction(self, pitch_id: int) -> None:
         """一球記錄後：用「這球之前」的資料預測，再跟實際落點對答案。"""
@@ -777,7 +833,7 @@ def _store_methods():
             r = conn.execute("SELECT * FROM pitches WHERE id = ?", [pitch_id]).fetchone()
         if not r or not r["opponent_tag"] or str(r["zone"]) == "0":
             return
-        pr = self.predict(r["opponent_tag"], r["pitcher"], r["balls_before"], r["strikes_before"], before_id=pitch_id)
+        pr = self.predict(r["opponent_tag"], r["pitcher"], r["balls_before"], r["strikes_before"], before_id=pitch_id, ctx=dict(r))
         if pr["n"] == 0:
             return
         tops = [z["zone"] for z in pr["zones"]]
@@ -810,7 +866,7 @@ def _store_methods():
                 "SELECT pitcher, COUNT(*) FROM pitches WHERE pitcher != '' AND pitcher != '未知投手' GROUP BY pitcher"
             ).fetchall()}
 
-    for f in (pitcher_name_counts, player_view, known_players, predict, score_prediction, prediction_accuracy):
+    for f in (_model_rows, retrain_model, model_meta, _model_and_states, pitcher_name_counts, player_view, known_players, predict, score_prediction, prediction_accuracy):
         setattr(PitchStore, f.__name__, f)
 
 

@@ -166,6 +166,7 @@ td.x{text-align:right;white-space:nowrap}
     </div>
     <div class="row sub" id="accText">預測命中率：尚無資料</div>
     <div class="row sub" id="perfText"></div>
+    <div class="row sub" id="modelText"></div>
     <div class="row">
       <button class="btn sm" id="undoBtn">撤銷上一球</button>
       <button class="btn sm" id="exportBtn">匯出 CSV</button>
@@ -236,7 +237,7 @@ td.x{text-align:right;white-space:nowrap}
 
 <script>
 (() => {
-  const VERSION = "2026-11-10f";
+  const VERSION = "2026-11-10g";
   const $ = id => document.getElementById(id);
   const RES = { strike: "好球", ball: "壞球", foul: "界外", in_play: "擊出" };
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -376,7 +377,13 @@ td.x{text-align:right;white-space:nowrap}
     }).join("");
     const types = (pr && pr.types) || [];
     $("predTypes").innerHTML = types.map((t, i) => `<span class="chip${i === 0 ? " top" : ""}">${esc(t.name)} ${t.pct}%</span>`).join("");
-    $("predNote").textContent = !pr ? "等對方開始投球" : !pr.n ? "這位玩家還沒有資料" : (pr.n < 8 ? `資料還很少（${pr.n} 球），僅供參考` : "");
+    const how = pr && pr.method === "AI" ? "AI 預測" : "統計預測";
+    $("predNote").textContent = !pr ? "等對方開始投球" : !pr.n ? "這位玩家還沒有資料"
+      : (pr.n < 8 ? `${how}・資料還很少（${pr.n} 球），僅供參考` : `${how}・根據這位玩家 ${pr.n} 球`);
+    const mm = pr && pr.model;
+    $("modelText").textContent = mm && mm.trained_at
+      ? `預測 AI：${mm.active ? "使用中" : "未啟用"}（${mm.reason || ""}）・最近回測 ${mm.test_n || 0} 球：AI 第一名 ${mm.ai_top1 ?? "-"}%／前三 ${mm.ai_top3 ?? "-"}%，統計 第一名 ${mm.stats_top1 ?? "-"}%／前三 ${mm.stats_top3 ?? "-"}%・${mm.trained_at} 訓練`
+      : "預測 AI：還沒訓練";
     const ag = pr && pr.accuracy_game, ap = pr && pr.accuracy_player;
     $("accText").textContent = ag && ag.n ? `預測命中率（本場 ${ag.n} 球）：第一名 ${ag.top1}%・前三名 ${ag.top3}%` + (ap && ap.n ? `；這位玩家全部 ${ap.n} 球：第一名 ${ap.top1}%・前三名 ${ap.top3}%` : "") : "預測命中率：尚無資料";
   }

@@ -297,6 +297,8 @@ def main() -> None:
         return
 
     store = PitchStore()
+    # 下一球預測 AI：啟動時在背景用全部資料重訓一次（不到 1 秒）
+    threading.Thread(target=lambda: store.retrain_model(), daemon=True).start()
     ocr_engine = BBOOCREngine()
     tracker = GameSessionTracker(
         store=store,

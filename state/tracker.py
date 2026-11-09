@@ -34,6 +34,7 @@ from detect.gameover import has_confirm_box_button
 from ocr.engine import BBOOCREngine
 from ocr.phash import classify_pitch_group, levenshtein_distance
 import re
+import threading
 from store.db import PitchStore
 
 
@@ -70,7 +71,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10f"
+APP_VERSION = "2026-11-10g"
 
 
 @dataclass
@@ -341,6 +342,12 @@ class GameSessionTracker:
         self._force_teams = True
 
     _RESULT_NAME = {"foul": "界外", "in_play": "擊出", "strike": "好球", "ball": "壞球"}
+
+    def _retrain_model(self) -> None:
+        try:
+            self.store.retrain_model()
+        except Exception as e:
+            print(f"  [預測 AI 重訓失敗] {e}", flush=True)
 
     def _canon_pitcher(self, name: str) -> str:
         """
@@ -735,6 +742,9 @@ class GameSessionTracker:
         self.pitcher = ""
         self.game_over = False
         self._newgame_streak = 0
+        # 上一場結束：在背景重訓下一球預測 AI，讓新資料馬上派上用場
+        if getattr(self, "_pitches_this_game", 0) > 0:
+            threading.Thread(target=self._retrain_model, daemon=True).start()
         self.team_names = {"top": [], "bottom": []}
         self._team_change_cand = None
         self._team_change_streak = 0
