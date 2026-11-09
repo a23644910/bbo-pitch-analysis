@@ -68,7 +68,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10c"
+APP_VERSION = "2026-11-10d"
 
 
 @dataclass
@@ -103,6 +103,7 @@ class TrackerStatus:
     pitching_players: str = ""  # 目前投球方的玩家 ID
     pitching_slot: str = ""  # 例如「主隊1・單數局」
     players: List[Dict[str, Any]] = field(default_factory=list)  # 四個（或兩個）玩家欄位
+    audit: Dict[str, int] = field(default_factory=dict)  # 記分板審核：核對／改正／補漏記
 
 
 def _norm_id(text: str) -> str:
@@ -190,6 +191,12 @@ class GameSessionTracker:
         # 雙方玩家 ID（用來標記每一球是誰投的）
         self.record_both: bool = bool(getattr(self.config, "record_both", False))
         self.team_names: Dict[str, List[str]] = {"top": [], "bottom": []}
+        self._team_change_cand = None
+        self._team_change_streak = 0
+        self._pitches_this_game = 0
+        self.id_changed = False
+        self.audit: Dict[str, int] = {"checked": 0, "fixed": 0, "missed": 0}
+        self._missed_cand = None
         self.capture_mode: str = ""
         self.reject_counts: Dict[str, int] = {}
         # 給記錄器用：每幀的判斷結果、可疑事件
@@ -222,6 +229,7 @@ class GameSessionTracker:
         # 兩邊各自目前的投手（換邊時先切回那一邊上次的投手，再等 OCR 確認）
         self._pitcher_by_side: Dict[str, str] = {}
         self._pitch_inning: int = 1
+        self._force_teams: bool = True
         self._force_names: bool = False
         self.outs: int = 0
         self.batter: str = ""
@@ -320,8 +328,115 @@ class GameSessionTracker:
         self._pitch_inning = nxt
         self.batter = ""
         self._force_names = True
+        self._force_teams = True
 
     _RESULT_NAME = {"foul": "界外", "in_play": "擊出", "strike": "好球", "ball": "壞球"}
+
+    def _check_missed(self, cur: Tuple[int, int], ts: float, det_seen: bool) -> bool:
+        """
+        記分板的球數比目前多走了一顆（壞球或好球），但程式沒有記到那一球：
+        持續 3 秒、期間沒有看到落點標記 → 補一筆「漏記」。觀察期間回傳 True（暫不同步球數）。
+        """
+        tb, ts_ = self.tracked_balls, self.tracked_strikes
+        if tb is None or ts_ is None or self._pitches_this_game == 0:
+            self._missed_cand = None
+            return False
+        kind = None
+        if cur == (tb + 1, ts_) and tb + 1 <= 3:
+            kind = "ball"
+        elif cur == (tb, ts_ + 1) and ts_ + 1 <= 2:
+            kind = "strike"
+        allowed = self.record_both or self._row_for_logic() == self.my_batting_row
+        if kind is None or not allowed:
+            self._missed_cand = None
+            return False
+        if det_seen:
+            # 看得到標記代表這球正在處理中，交給正常流程
+            self._missed_cand = None
+            return True
+        if not self._missed_cand or self._missed_cand[0] != cur:
+            self._missed_cand = (cur, ts)
+            return True
+        if ts - self._missed_cand[1] < 3.0:
+            return True
+        self._missed_cand = None
+        side = self._other(self._row_for_logic())
+        record = {
+            "game_id": self.game_id, "ts": datetime.now().isoformat(timespec="seconds"),
+            "inning": self.inning, "half": self.half, "outs": self.outs,
+            "pitcher": self.pitcher or "未知投手",
+            "opponent_tag": self._players_for(side, self.inning) or self.opponent_tag,
+            "batter": self.batter or "未知打者",
+            "balls_before": tb, "strikes_before": ts_,
+            "zone": "0", "x_norm": 0.5, "y_norm": 0.5, "result": kind,
+            "note": f"漏記：記分板球數 {tb}-{ts_} → {cur[0]}-{cur[1]}，落點不明",
+        }
+        try:
+            pid = self.store.insert_pitch(record)
+            self.audit["missed"] += 1
+            self.corrections.append({"id": pid, "result": kind, "note": record["note"]})
+            print(f"  [記分板審核] 補一筆漏記的{self._RESULT_NAME[kind]}（#{pid}）", flush=True)
+        except Exception as e:
+            print(f"  [補漏記失敗] {e}", flush=True)
+        return False
+
+    def _audit_fix(self, exp: Tuple[int, int], after: Tuple[int, int]) -> bool:
+        """
+        記分板逐球審核：上一球記完後，記分板的球數跟推算的不一樣時，看得出原因就自動改：
+        1. 好壞球判反：記「好球」但記分板多一顆壞球（或反過來）→ 改結果。
+        2. 漏記一球：記分板比推算多走了一球 → 補一筆「漏記」（落點不知道，不算進九宮格）。
+        改不了的（例如 0-0 暫停 bug）回傳 False，交給原本的處理。
+        """
+        rec = self.last_recorded_pitch
+        if not rec or rec.get("id") != self._last_recorded_pitch_id:
+            return False
+        b0, s0, r = rec.get("balls_before"), rec.get("strikes_before"), rec.get("result")
+        if b0 is None or s0 is None or after == (0, 0):
+            return False
+        flip = None
+        if r == "strike" and after == (b0 + 1, s0) and b0 + 1 <= 3:
+            flip = "ball"
+        elif r == "ball" and after == (b0, s0 + 1) and s0 + 1 <= 2:
+            flip = "strike"
+        if flip:
+            note_add = f"記分板審核：{self._RESULT_NAME[r]}→{self._RESULT_NAME[flip]}（球數 {after[0]}-{after[1]}）"
+            note = f"{rec.get('note')}; {note_add}" if rec.get("note") else note_add
+            try:
+                self.store.update_pitch(rec["id"], result=flip, note=note)
+            except Exception as e:
+                print(f"  [審核修正失敗] {e}", flush=True)
+                return False
+            rec["result"], rec["note"] = flip, note
+            self.tracked_balls, self.tracked_strikes = after
+            self.audit["fixed"] += 1
+            self.corrections.append({"id": rec["id"], "result": flip, "note": note_add})
+            print(f"  [記分板審核] #{rec['id']} {note_add}", flush=True)
+            return True
+        missed = None
+        if after == (exp[0] + 1, exp[1]) and exp[0] + 1 <= 3:
+            missed = "ball"
+        elif after == (exp[0], exp[1] + 1) and exp[1] + 1 <= 2:
+            missed = "strike"
+        if missed:
+            record = {
+                "game_id": self.game_id, "ts": datetime.now().isoformat(timespec="seconds"),
+                "inning": rec.get("inning", self.inning), "half": rec.get("half", self.half), "outs": self.outs,
+                "pitcher": rec.get("pitcher", ""), "opponent_tag": rec.get("opponent_tag", ""), "batter": rec.get("batter", ""),
+                "balls_before": exp[0], "strikes_before": exp[1],
+                "zone": "0", "x_norm": 0.5, "y_norm": 0.5, "result": missed,
+                "note": f"漏記：記分板球數 {exp[0]}-{exp[1]} → {after[0]}-{after[1]}，落點不明",
+            }
+            try:
+                pid = self.store.insert_pitch(record)
+            except Exception as e:
+                print(f"  [補漏記失敗] {e}", flush=True)
+                return False
+            self.tracked_balls, self.tracked_strikes = after
+            self.audit["missed"] += 1
+            self.corrections.append({"id": pid, "result": missed, "note": record["note"]})
+            print(f"  [記分板審核] 補一筆漏記的{self._RESULT_NAME[missed]}（#{pid}）", flush=True)
+            return True
+        return False
 
     def _resolve_hit(self, new_result: str, why: str) -> None:
         """確認暫記的界外／擊出；和當初記的不同就改資料庫，並記一筆修正。"""
@@ -434,8 +549,78 @@ class GameSessionTracker:
                 })
         return out
 
+    @staticmethod
+    def _same_id(a: str, b: str) -> bool:
+        """兩個 ID 是否為同一人（容許文字辨識少量錯字）。"""
+        import difflib
+        na = re.sub(r"\s+", "", (a or "").lower())
+        nb = re.sub(r"\s+", "", (b or "").lower())
+        if not na or not nb:
+            return False
+        return na == nb or na in nb or nb in na or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.6
+
+    def _same_team(self, a: List[str], b: List[str]) -> bool:
+        return bool(a) and bool(b) and len(a) == len(b) and all(self._same_id(x, y) for x, y in zip(a, b))
+
     def _update_team_names(self, names: Dict[str, str]) -> None:
-        """從記分板（單人）或 HOME / AWAY 面板（2 對 2）整理雙方玩家 ID。"""
+        """
+        從記分板（單人）或 HOME / AWAY 面板（2 對 2）整理雙方玩家 ID。
+        已經有 ID 時：連續兩次讀到不一樣的人才換（避免文字辨識偶發錯字）；
+        任何一隊的人全部換掉＝已經是新的一場（沒看到結算畫面也一樣）→ 自動開新場次。
+        """
+        top, bot = self._parse_team_names(names)
+        cur_top, cur_bot = self.team_names.get("top", []), self.team_names.get("bottom", [])
+        # 讀到的人數比現在少（面板被擋住、只讀到一半）不算換人
+        new_top = top if top and len(top) >= len(cur_top) and not self._same_team(top, cur_top) else None
+        new_bot = bot if bot and len(bot) >= len(cur_bot) and not self._same_team(bot, cur_bot) else None
+        if new_top is None and new_bot is None:
+            self._team_change_cand = None
+            self._team_change_streak = 0
+            # 第一次讀到、或補上原本缺的那一隊
+            if top and not cur_top:
+                self.team_names["top"] = top
+            if bot and not cur_bot:
+                self.team_names["bottom"] = bot
+            return
+        if not cur_top and not cur_bot:
+            if top:
+                self.team_names["top"] = top
+            if bot:
+                self.team_names["bottom"] = bot
+            return
+        cand = (tuple(new_top or []), tuple(new_bot or []))
+        if self._team_change_cand == cand:
+            self._team_change_streak += 1
+        else:
+            self._team_change_cand = cand
+            self._team_change_streak = 1
+        if self._team_change_streak < 2:
+            return
+        self._team_change_streak = 0
+        self._team_change_cand = None
+        def all_new(new, cur):
+            return bool(new and cur) and not any(self._same_id(x, y) for x in new for y in cur)
+        # 比賽中途不會換人：任何一隊的人全部不一樣＝已經是新的一場（沒看到結算畫面也一樣）
+        team_replaced = all_new(new_top, cur_top) or all_new(new_bot, cur_bot)
+        old = f"{' / '.join(cur_top)} vs {' / '.join(cur_bot)}"
+        if team_replaced and self._pitches_this_game > 0:
+            print(f"  [對手變了] 有一隊的玩家全部換人（原本 {old}），自動開新的一場", flush=True)
+            self.start_new_game()
+            if top:
+                self.team_names["top"] = list(top)
+            if bot:
+                self.team_names["bottom"] = list(bot)
+        if new_top:
+            self.team_names["top"] = list(new_top)
+        if new_bot:
+            self.team_names["bottom"] = list(new_bot)
+        now = f"{' / '.join(self.team_names['top'])} vs {' / '.join(self.team_names['bottom'])}"
+        print(f"  [玩家 ID 更新] {now}", flush=True)
+        self._emit("玩家ID更新", note=f"{old} → {now}")
+        self.id_changed = True
+
+    def _parse_team_names(self, names: Dict[str, str]):
+        """回傳 (上行玩家列表, 下行玩家列表)。"""
         top_txt = (names.get("top") or "").strip()
         bot_txt = (names.get("bottom") or "").strip()
         if "TEAM" in (top_txt + bot_txt).upper():
@@ -445,10 +630,7 @@ class GameSessionTracker:
         else:
             top = [clean_player_id(top_txt)] if clean_player_id(top_txt) else []
             bot = [clean_player_id(bot_txt)] if clean_player_id(bot_txt) else []
-        if top:
-            self.team_names["top"] = top
-        if bot:
-            self.team_names["bottom"] = bot
+        return top, bot
 
     def start_new_game(self) -> None:
         """開始新的一場：新場次編號、局數球數歸零、清掉進行中的投球，並重新判斷先後攻。"""
@@ -472,6 +654,10 @@ class GameSessionTracker:
         self.game_over = False
         self._newgame_streak = 0
         self.team_names = {"top": [], "bottom": []}
+        self._team_change_cand = None
+        self._team_change_streak = 0
+        self._pitches_this_game = 0
+        self.audit = {"checked": 0, "fixed": 0, "missed": 0}
         self.stable_batting_row = "unknown"
         self._row_cand = "unknown"
         self._row_cand_streak = 0
@@ -563,6 +749,7 @@ class GameSessionTracker:
             pitching_players=self._players_for(pside, self.inning),
             pitching_slot=pslot,
             players=self.player_slots(),
+            audit=dict(self.audit),
         )
 
     @staticmethod
@@ -666,13 +853,18 @@ class GameSessionTracker:
                     self._row_cand_streak = 1
                 if self._row_cand_streak >= 10 and self.stable_batting_row != sb.batting_row:
                     self._on_side_change(sb.batting_row)
-            # 還沒讀到雙方玩家 ID 時，約每 5 秒讀一次
+            # 讀雙方玩家 ID：還沒讀到時約每 5 秒一次；讀到之後約每 15 秒再核對一次（換人、換場才抓得到）；攻守交換時馬上讀
+            missing = not self.team_names["top"] or not self.team_names["bottom"]
             if (
-                (not self.team_names["top"] or not self.team_names["bottom"])
-                and self._frame_idx % 150 == 20
-                and not (self.row_mode == "auto" and self.row_status == "searching")
+                not (self.row_mode == "auto" and self.row_status == "searching")
+                and (
+                    self._force_teams
+                    or (missing and self._frame_idx % 150 == 20)
+                    or (self._frame_idx % 450 == 20)
+                )
             ):
-                self._submit("teams", self.ocr_engine.read_team_names, client_bgr.copy(), self.config)
+                if self._submit("teams", self.ocr_engine.read_team_names, client_bgr.copy(), self.config):
+                    self._force_teams = False
             # 依 ID 自動判斷先攻／後攻：還沒找到時約每秒試一次
             if (
                 self.row_mode == "auto"
@@ -735,6 +927,8 @@ class GameSessionTracker:
                         (self.tracked_balls or 0) > 0 or (self.tracked_strikes or 0) > 0
                     ):
                         pass
+                    elif self._check_missed(cur_sb, ts_sec, det_seen=self._last_det is not None):
+                        pass  # 還在觀察是不是漏記，先不同步
                     else:
                         self.tracked_balls, self.tracked_strikes = cur_sb
         else:
@@ -854,7 +1048,10 @@ class GameSessionTracker:
             elif self._stable_sb_count >= 5:
                 balls_after, strikes_after = cur_sb_pair
                 exp = self._last_recorded_expected_count
-                if exp is not None and (balls_after, strikes_after) != exp:
+                self.audit["checked"] += 1
+                if exp is not None and (balls_after, strikes_after) != exp and self._audit_fix(exp, (balls_after, strikes_after)):
+                    pass  # 記分板審核已自動改正（好壞球判反或漏記一球）
+                elif exp is not None and (balls_after, strikes_after) != exp:
                     # BBO2 0-0 pause bug or discrepancy detected
                     if balls_after == 0 and strikes_after == 0 and exp != (0, 0):
                         # Scoreboard was reset by pause/TAB bug -> keep expected count
@@ -1168,6 +1365,7 @@ class GameSessionTracker:
             "snapshot": f"/snapshots/{snap_name}",
         }
         pitch_id = self.store.insert_pitch(record)
+        self._pitches_this_game += 1
         try:
             self.store.score_prediction(pitch_id)  # 自動對答案：用這球之前的資料預測，再跟實際落點比
         except Exception as e:

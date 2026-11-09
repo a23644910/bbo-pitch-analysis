@@ -109,6 +109,11 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;fl
 .seg button.on{background:var(--gold);color:var(--deep);font-weight:700}
 select.other{min-height:36px;border-radius:10px;border:1px solid var(--line);background:var(--deep);padding:0 8px;font-size:13px;max-width:100%}
 
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.stats>div{background:var(--deep);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.stats .k{font-size:12px;color:var(--muted)}
+.stats .v{font-family:var(--num);font-size:26px;font-weight:700;line-height:1.1}
+@media (max-width:480px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 /* 逐球紀錄 */
 .tbl{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:14px}
@@ -208,14 +213,16 @@ td.x{text-align:right;white-space:nowrap}
     <div class="left">
       <section class="card" aria-label="即時數據">
         <div class="h">
-          <div style="display:flex;flex-direction:column;gap:2px"><b>即時數據</b><span class="sub" id="liveSub">本場・自動跟著目前投手</span></div>
+          <div style="display:flex;flex-direction:column;gap:2px"><b>即時數據</b><span class="sub" id="liveSub">本場・自動跟著目前投球的玩家</span></div>
           <span class="legend">少<i></i>多</span>
         </div>
         <div class="grid" id="lGrid"></div>
-        <div class="sub">顏色越紅＝越常投這裡；綠色「壞球」標籤＝這格多半是壞球。</div>
+        <div class="stats" id="liveStats"></div>
+        <div class="sub" id="auditText"></div>
+        <div class="sub">顏色越紅＝越常投這裡；綠色「帶外」標籤＝這格的球多半投在好球帶外（引誘球）。追打率＝帶外球被我方揮棒的比例。</div>
       </section>
       <section class="card" aria-label="逐球紀錄">
-        <div class="h"><b>逐球紀錄</b><span class="sub">本場・這位投手・最新在上</span></div>
+        <div class="h"><b>逐球紀錄</b><span class="sub">本場・這位玩家・最新在上</span></div>
         <div class="tbl"><table>
           <thead><tr><th>局</th><th>球數</th><th>落點</th><th>球種</th><th>結果</th><th></th></tr></thead>
           <tbody id="log"></tbody>
@@ -227,7 +234,7 @@ td.x{text-align:right;white-space:nowrap}
 
 <script>
 (() => {
-  const VERSION = "2026-11-10c";
+  const VERSION = "2026-11-10d";
   const $ = id => document.getElementById(id);
   const RES = { strike: "好球", ball: "壞球", foul: "界外", in_play: "擊出" };
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -252,7 +259,7 @@ td.x{text-align:right;white-space:nowrap}
     return view.cells.map(c => {
       const id = idp ? ` id="${idp}${c.zone}"` : "";
       if (!c.n) return `<div class="cell"${id}><span class="p">—</span></div>`;
-      const tag = c.ball_pct > 50 ? `<span class="tag ball">壞球 ${c.ball_pct}%</span>` : `<span class="tag strike">好球 ${100 - c.ball_pct}%</span>`;
+      const tag = c.out_pct >= 50 ? `<span class="tag ball">帶外 ${c.out_pct}%</span>` : `<span class="tag strike">帶外 ${c.out_pct}%</span>`;
       return `<div class="cell"${id} style="background:${heat(c.n / max)}"><span class="p">${c.pct}%</span>${tag}</div>`;
     }).join("");
   }
@@ -305,7 +312,13 @@ td.x{text-align:right;white-space:nowrap}
   }
 
   function renderLive(live) {
-    $("liveSub").textContent = live ? `本場・自動跟著目前投手：${live.tag}／${live.pitcher || "投手讀取中"}` : "本場・等對方開始投球";
+    const au = (st.status && st.status.audit) || {};
+    $("auditText").textContent = au.checked ? `記分板審核（本場）：已核對 ${au.checked} 球・自動改正 ${au.fixed || 0} 球・補上漏記 ${au.missed || 0} 球` : "";
+    $("liveSub").textContent = live ? `本場・自動跟著目前投球的玩家：${live.tag}` : "本場・等對方開始投球";
+    $("liveStats").innerHTML = live ? [
+      ["本場", `${live.total} 球`], ["全部場次", `${live.total_all} 球`],
+      ["帶外", live.out_pct == null ? "—" : live.out_pct + "%"], ["追打率", live.chase_pct == null ? "—" : live.chase_pct + "%"],
+    ].map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${v}</span></div>`).join("") : "";
     $("lGrid").innerHTML = live && live.total ? gridHTML(live, "lz") : '<div class="empty" style="grid-column:1/-1">這位投手本場還沒有紀錄</div>';
     decorateLast(live);
     const rows = (live && live.recent) || [];
@@ -316,7 +329,7 @@ td.x{text-align:right;white-space:nowrap}
           <select name="result" aria-label="結果">${Object.entries(RES).map(([k, v]) => `<option value="${k}"${k === p.result ? " selected" : ""}>${v}</option>`).join("")}</select>
           <input name="raw" value="${esc(p.pitch_raw || "")}" placeholder="球種" aria-label="球種">
           <button class="btn sm" type="submit">存</button><button class="btn sm" type="button" data-cancel="1">取消</button></form></td></tr>` : "";
-      return `<tr><td>${p.inning}${esc(p.half)}</td><td>${cnt}</td><td>${esc(p.zone)} 號</td><td>${esc(p.pitch_raw || "—")}</td>
+      return `<tr><td>${p.inning}${esc(p.half)}</td><td>${cnt}</td><td>${String(p.zone) === "0" ? "不明（漏記）" : esc(p.zone) + " 號"}</td><td>${esc(p.pitch_raw || "—")}</td>
         <td class="r ${esc(p.result)}">${RES[p.result] || esc(p.result)}</td>
         <td class="x"><button class="ib" data-edit="${p.id}" aria-label="修改">改</button> <button class="ib" data-del="${p.id}" aria-label="刪除">✕</button></td></tr>${edit}`;
     }).join("") : '<tr><td colspan="6" class="empty">尚無紀錄</td></tr>';
@@ -346,7 +359,7 @@ td.x{text-align:right;white-space:nowrap}
     ((pr && pr.zones) || []).forEach((z, i) => { rank[z.zone] = { i: i + 1, z }; });
     $("mini").innerHTML = [1,2,3,4,5,6,7,8,9].map(n => {
       const r = rank[String(n)];
-      return r ? `<div class="r${r.i}"><span class="p">${r.z.pct}%</span><span class="t">壞球 ${r.z.ball_pct}%</span></div>` : "<div></div>";
+      return r ? `<div class="r${r.i}"><span class="p">${r.z.pct}%</span><span class="t">帶外 ${r.z.out_pct}%</span></div>` : "<div></div>";
     }).join("");
     const types = (pr && pr.types) || [];
     $("predTypes").innerHTML = types.map((t, i) => `<span class="chip${i === 0 ? " top" : ""}">${esc(t.name)} ${t.pct}%</span>`).join("");
@@ -371,7 +384,8 @@ td.x{text-align:right;white-space:nowrap}
       ps.map(p => `<button class="pchip${p.name === st.pitcher ? " on" : ""}" data-pi="${esc(p.name)}">${esc(p.name || "未知投手")}</button>`).join("");
     $("pGrid").innerHTML = v.total ? gridHTML(v) : '<div class="empty" style="grid-column:1/-1">這個範圍沒有紀錄</div>';
     $("pTypes").innerHTML = (v.types || []).slice(0, 5).map(t => `<span class="chip lite">${esc(t.name)} <b>${t.pct}%</b></span>`).join("");
-    $("pSum").textContent = `${v.tag}・${st.pitcher === "all" ? "全部投手" : st.pitcher}・${st.scope === "current" ? "本場" : v.games + " 場"} ${v.total} 球`;
+    $("pSum").textContent = `${v.tag}・${st.pitcher === "all" ? "全部投手" : st.pitcher}・${st.scope === "current" ? "本場" : v.games + " 場"} ${v.total} 球`
+      + (v.out_pct != null ? `・帶外 ${v.out_pct}%` : "") + (v.chase_pct != null ? `・追打率 ${v.chase_pct}%` : "");
   }
 
   // 事件

@@ -225,7 +225,8 @@ def create_app(
         cur_tag = st.pitching_players if st.pitching_players and " / " not in st.pitching_players else ""
         live = None
         if cur_tag:
-            live = store.player_view(cur_tag, st.pitcher or "all", tracker.game_id)
+            # 即時數據跟著「玩家」：本場這位玩家所有投手的球
+            live = store.player_view(cur_tag, "all", tracker.game_id)
             live["tag"] = cur_tag
             live["pitcher"] = st.pitcher
         pred = None

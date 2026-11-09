@@ -107,13 +107,18 @@ class BBOOCREngine:
            if BBOOCREngine._shared_ocr is None:
             from paddleocr import PaddleOCR
 
-            BBOOCREngine._shared_ocr = PaddleOCR(
+            kw = dict(
                 lang="chinese_cht",
                 enable_mkldnn=False,
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
             )
+            try:
+                # 輕量化：文字辨識最多用 3 個 CPU 執行緒，把其他核心留給遊戲
+                BBOOCREngine._shared_ocr = PaddleOCR(cpu_threads=3, **kw)
+            except TypeError:
+                BBOOCREngine._shared_ocr = PaddleOCR(**kw)
         return BBOOCREngine._shared_ocr
 
     def run_ocr_lines(self, img_bgr: np.ndarray, upscale: float = 2.0) -> List[str]:

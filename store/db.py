@@ -601,17 +601,34 @@ class PitchStore:
 # ----------------------------------------------------------------------
 def _grid_and_types(pitches: List[Dict[str, Any]]) -> Dict[str, Any]:
     """九宮格（比例＋好壞球比例）與球種分布。壞球＝結果是 ball，其餘（好球、界外、擊出）算好球。"""
+    # 漏記補上的球（zone "0"）落點不明，不算進九宮格與比例
+    pitches = [p for p in pitches if str(p.get("zone")) in ("1", "2", "3", "4", "5", "6", "7", "8", "9")]
     total = len(pitches)
+
+    def outside(p) -> Optional[bool]:
+        """依標記實際位置判斷是否在好球帶外（x_norm / y_norm 以好球帶為 0~1）。沒有位置資料回傳 None。"""
+        x, y = p.get("x_norm"), p.get("y_norm")
+        if x is None or y is None:
+            return None
+        return not (0.0 <= float(x) <= 1.0 and 0.0 <= float(y) <= 1.0)
+
+    SWING = ("strike", "foul", "in_play")
     cells = []
     for z in range(1, 10):
         sub = [p for p in pitches if str(p["zone"]) == str(z)]
         n = len(sub)
         balls = sum(1 for p in sub if p["result"] == "ball")
+        located = [p for p in sub if outside(p) is not None]
+        outs = [p for p in located if outside(p)]
         cells.append({
             "zone": str(z), "n": n,
             "pct": round(n * 100.0 / total) if total else 0,
             "ball_pct": round(balls * 100.0 / n) if n else 0,
+            "out_pct": round(len(outs) * 100.0 / len(located)) if located else 0,
         })
+    located = [p for p in pitches if outside(p) is not None]
+    out_all = [p for p in located if outside(p)]
+    chased = [p for p in out_all if p["result"] in SWING]
     known = [p for p in pitches if p.get("pitch_raw")]
     tcount: Dict[str, int] = {}
     for p in known:
@@ -620,7 +637,13 @@ def _grid_and_types(pitches: List[Dict[str, Any]]) -> Dict[str, Any]:
         {"name": k, "n": v, "pct": round(v * 100.0 / len(known))}
         for k, v in sorted(tcount.items(), key=lambda x: -x[1])
     ]
-    return {"total": total, "cells": cells, "types": types, "typed": len(known)}
+    return {
+        "total": total, "cells": cells, "types": types, "typed": len(known),
+        # 帶外比例：投到好球帶外的球占多少；追打率：帶外球裡被揮棒（好球／界外／擊出）的比例
+        "out_pct": round(len(out_all) * 100.0 / len(located)) if located else None,
+        "chase_pct": round(len(chased) * 100.0 / len(out_all)) if out_all else None,
+        "out_n": len(out_all),
+    }
 
 
 def _store_methods():
@@ -647,6 +670,8 @@ def _store_methods():
                 ).fetchall()
             ]
         out["recent"] = rows[:40]
+        with self._connect() as conn:
+            out["total_all"] = conn.execute("SELECT COUNT(*) FROM pitches WHERE opponent_tag = ?", [opponent_tag]).fetchone()[0]
         return out
 
     def known_players(self) -> List[Dict[str, Any]]:
@@ -665,7 +690,7 @@ def _store_methods():
         where, params = ["opponent_tag = ?"], [opponent_tag]
         if before_id is not None:
             where.append("id < ?"); params.append(before_id)
-        hist = list(reversed(_rows(self, " AND ".join(where), params)))  # 舊 → 新
+        hist = [h for h in reversed(_rows(self, " AND ".join(where), params)) if str(h["zone"]) != "0"]  # 舊 → 新，略過落點不明的漏記
         Z = [str(i) for i in range(1, 10)]
 
         def bucket(b, s):
@@ -714,10 +739,13 @@ def _store_methods():
         zones = []
         for z in sorted(Z, key=lambda z: -score[z])[:3]:
             inz = [h for h in hist if str(h["zone"]) == z]
+            loc = [h for h in inz if h.get("x_norm") is not None and h.get("y_norm") is not None]
+            outn = sum(1 for h in loc if not (0.0 <= float(h["x_norm"]) <= 1.0 and 0.0 <= float(h["y_norm"]) <= 1.0))
             zones.append({
                 "zone": z, "n": len(inz),
                 "pct": round(score[z] * 100.0 / tot),
                 "ball_pct": round(sum(1 for h in inz if h["result"] == "ball") * 100.0 / len(inz)) if inz else 0,
+                "out_pct": round(outn * 100.0 / len(loc)) if loc else 0,
             })
         tpool = comps[1] if len([h for h in comps[1] if h.get("pitch_raw")]) >= 5 else hist
         g = _grid_and_types(tpool)
@@ -728,7 +756,7 @@ def _store_methods():
         """一球記錄後：用「這球之前」的資料預測，再跟實際落點對答案。"""
         with self._connect() as conn:
             r = conn.execute("SELECT * FROM pitches WHERE id = ?", [pitch_id]).fetchone()
-        if not r or not r["opponent_tag"]:
+        if not r or not r["opponent_tag"] or str(r["zone"]) == "0":
             return
         pr = self.predict(r["opponent_tag"], r["pitcher"], r["balls_before"], r["strikes_before"], before_id=pitch_id)
         if pr["n"] == 0:

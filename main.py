@@ -29,6 +29,15 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
+# 輕量化：限制數學運算函式庫的執行緒數（要在載入 numpy / OpenCV / Paddle 之前設定），並把程式設成「低於一般」優先權，讓遊戲優先
+for _k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ.setdefault(_k, "3")
+try:
+    import ctypes as _ct
+    _ct.windll.kernel32.SetPriorityClass(_ct.windll.kernel32.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL
+except Exception:
+    pass
+
 # 讓 Windows 回報真實像素座標（不同縮放比例 125%/150%、多螢幕時，截圖位置才不會偏掉）
 try:
     import ctypes
@@ -41,6 +50,8 @@ except Exception:
 
 import webbrowser
 import cv2
+
+cv2.setNumThreads(2)
 import uvicorn
 
 from capture.calibration import CalibrationConfig
@@ -81,6 +92,7 @@ def run_live_capture_loop(
     paused_by_focus = False
     bg_capture = BackgroundCapture()
     warned_aspect = False
+    idle_since = None
     last_win_log = 0.0
 
     while stop_event is None or not stop_event.is_set():
@@ -204,9 +216,18 @@ def run_live_capture_loop(
                     print(f"  [略過] 看到標記但未記錄（幀數）：{detail}", flush=True)
                     tracker.reject_counts = {}
 
+        # 輕量化：不是打擊畫面（守備、換局動畫、結算）超過 2 秒、也沒有正在處理的球 → 降到每秒約 10 張
+        interval = frame_interval
+        idle = (not getattr(tracker, "_last_batting_cam", True)) and tracker._pending is None
+        if idle:
+            idle_since = idle_since or time.perf_counter()
+            if time.perf_counter() - idle_since > 2.0:
+                interval = max(frame_interval, 0.1)
+        else:
+            idle_since = None
         elapsed = time.perf_counter() - loop_start
-        if elapsed < frame_interval:
-            time.sleep(frame_interval - elapsed)
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
 
 
 def run_video_replay_loop(
