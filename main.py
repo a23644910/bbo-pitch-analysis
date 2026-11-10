@@ -288,6 +288,7 @@ def main() -> None:
     parser.add_argument("--video", default=None, help="指定測試影片路徑進行離線重播辨識")
     parser.add_argument("--calibrate", action="store_true", help="顯示半透明校正框視窗")
     parser.add_argument("--no-browser", action="store_true", help="啟動時不自動開啟瀏覽器")
+    parser.add_argument("--ocr-inprocess", action="store_true", help="文字辨識不開獨立程序（舊做法，除錯用）")
     args = parser.parse_args()
 
     config = CalibrationConfig.load()
@@ -299,7 +300,18 @@ def main() -> None:
     store = PitchStore()
     # 下一球預測 AI：啟動時在背景用全部資料重訓一次（不到 1 秒）
     threading.Thread(target=lambda: store.retrain_model(), daemon=True).start()
-    ocr_engine = BBOOCREngine()
+    # 文字辨識放在獨立程序（2026-11-10k）：PaddleOCR 推論會鎖住 Python，放在執行緒裡主程式每球卡 2～3 秒
+    ocr_engine = None
+    if not args.ocr_inprocess:
+        try:
+            from ocr.worker import RemoteOCREngine
+            ocr_engine = RemoteOCREngine(db_path=store.db_path)
+            print("  [文字辨識] 已在獨立程序啟動", flush=True)
+        except Exception as e:
+            print(f"  [文字辨識] 獨立程序啟動失敗，改用舊做法：{e}", flush=True)
+            ocr_engine = None
+    if ocr_engine is None:
+        ocr_engine = BBOOCREngine()
     tracker = GameSessionTracker(
         store=store,
         ocr_engine=ocr_engine,

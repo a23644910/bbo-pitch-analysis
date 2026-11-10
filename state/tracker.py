@@ -55,6 +55,8 @@ class PendingPitch:
     strikes_before: Optional[int]
     missing_frames: int = 0
     fielding_cut_frames: int = 0
+    # 鏡頭離開打擊畫面的「秒數」（2026-11-10k：改用秒數判斷擊出／界外，主程式偶爾卡住時張數會算少）
+    fielding_cut_sec: float = 0.0
     post_marker_frames: int = 0
     marker_gone: bool = False
     # 標記最後一次出現的位置（用來確認標記已經定住，不是飛行中的藍圈）
@@ -74,7 +76,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10j"
+APP_VERSION = "2026-11-10k"
 
 
 @dataclass
@@ -218,7 +220,7 @@ class GameSessionTracker:
         self._label_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-label")
         self._jobs: Dict[str, Any] = {}
         self._job_seq: int = 0
-        # 背景 OCR 排程（2026-11-10j）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
+        # 背景 OCR 排程（2026-11-10k）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
         self._wants: Dict[str, Tuple[Any, tuple, dict]] = {}
         self._bg_running: bool = False
         self._bg_free_since: float = -999.0
@@ -623,7 +625,7 @@ class GameSessionTracker:
         for job, (pid, t0) in list(self._label_fill.items()):
             done, res = self._take(job)
             if not done:
-                if ts - t0 > 10.0:
+                if ts - t0 > 20.0:
                     self._label_fill.pop(job, None)
                 continue
             self._label_fill.pop(job, None)
@@ -1152,7 +1154,7 @@ class GameSessionTracker:
         done, out = self._take("info")
         res = None
         if done and out:
-            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10j）：
+            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10k）：
             # 以前在這空檔讀到下半局的投手，被記到另一隊 → 整場兩隊投手對調、打者讀不到、一直重讀卡 CPU。
             # 擷取當下記分板的打擊方 ≠ 目前認定的打擊方，或現在記分板已經換邊 → 這次讀到的名字不用。
             row_cap, res = out
@@ -1357,13 +1359,14 @@ class GameSessionTracker:
 
             if not batting_cam:
                 p.fielding_cut_frames += 1
+                p.fielding_cut_sec += dt
             p.post_marker_frames += 1
 
             if (
                 p.confirm_frames < self._min_confirm_frames
                 and p.marker_gone
                 and p.best_detection.kind == "bullseye"
-                and p.fielding_cut_frames >= 2
+                and (p.fielding_cut_frames >= 2 or p.fielding_cut_sec >= 0.08)
             ):
                 # 擊球後鏡頭馬上切到守備，◎ 只來得及看到一幀 → 仍記成擊出
                 recorded = self._finalize_pending_pitch(p, ts_sec)
@@ -1402,7 +1405,7 @@ class GameSessionTracker:
                         p.label_checked = True
                         p.label_ok = False
 
-            # 先記錄、晚點補球種球速（2026-11-10j）：
+            # 先記錄、晚點補球種球速（2026-11-10k）：
             #   ⊗ 一定是壞球 → 不等 OCR；◎ 旁邊的標籤用圖形比對認出「STRIKE」字樣就算好球 → 也不等 OCR。
             #   OCR 讀完後由 _poll_label_fill 補進同一筆。圖形比對認不出來時才照舊等 OCR 確認。
             if bd.kind == "bullseye" and bd.has_label and not p.label_checked and p.tpl_word is None:
@@ -1422,7 +1425,7 @@ class GameSessionTracker:
             if has_lbl_or_red and (p.confirm_frames >= 3 or p.marker_gone):
                 should_finalize = True
             elif not has_lbl_or_red:
-                if p.fielding_cut_frames >= 3 and p.confirm_frames >= self._min_confirm_frames:
+                if (p.fielding_cut_frames >= 3 or p.fielding_cut_sec >= 0.1) and p.confirm_frames >= self._min_confirm_frames:
                     should_finalize = True
                 elif (elapsed >= 0.75 or p.marker_gone) and p.confirm_frames >= self._min_confirm_frames:
                     should_finalize = True
@@ -1564,7 +1567,7 @@ class GameSessionTracker:
             else:
                 # No label -> distinguish in_play (擊出) vs foul (界外)
                 if (
-                    p.fielding_cut_frames >= 2
+                    p.fielding_cut_frames >= 2 or p.fielding_cut_sec >= 0.08
                     or self.outs != p.outs_before
                     or self.half != p.half
                     or (self.batter and p.batter and self.batter != p.batter)
@@ -1634,7 +1637,7 @@ class GameSessionTracker:
             foul_exp = self._expected_count_after(p.balls_before, p.strikes_before, "foul")
             self._hit_check = {
                 "id": pitch_id, "result": result, "foul_exp": foul_exp,
-                "off": float(p.fielding_cut_frames) * 0.1, "note": note_str,
+                "off": max(float(p.fielding_cut_frames) * 0.1, p.fielding_cut_sec), "note": note_str,
             }
             if result == "in_play":
                 self.tracked_balls, self.tracked_strikes = 0, 0

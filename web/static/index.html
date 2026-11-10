@@ -120,7 +120,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}
 th{color:var(--muted);font-size:12px;font-weight:500;text-align:left;padding:6px 4px}
 td{padding:7px 4px;border-top:1px solid var(--line2);vertical-align:middle}
 td.r{font-weight:700}
-.r.strike{color:var(--strike)} .r.ball{color:var(--ball)} .r.foul{color:#8EC5FF} .r.in_play{color:#8EC5FF}
+.r.chase{color:#FFB547} .r.strike{color:var(--strike)} .r.ball{color:var(--ball)} .r.foul{color:#8EC5FF} .r.in_play{color:#8EC5FF}
 td.x{text-align:right;white-space:nowrap}
 .ib{min-height:32px;min-width:32px;border-radius:8px;border:1px solid var(--line);background:transparent;font-size:12px}
 .edit{display:flex;gap:6px;flex-wrap:wrap;padding:6px 0}
@@ -222,7 +222,7 @@ td.x{text-align:right;white-space:nowrap}
         <div class="grid" id="lGrid"></div>
         <div class="stats" id="liveStats"></div>
         <div class="sub" id="auditText"></div>
-        <div class="sub">顏色越紅＝越常投這裡；綠色「帶外」標籤＝這格的球多半投在好球帶外（引誘球）。追打率＝帶外球被我方揮棒的比例。</div>
+        <div class="sub">顏色越紅＝越常投這裡；「壞球率」＝這格的球投在好球帶外的比例（綠色＝多半是引誘球）。追打率＝帶外的球被我方揮棒的比例；揮空的帶外球照規則算好球，但標成橘色「追打壞球」。</div>
       </section>
       <section class="card" aria-label="逐球紀錄">
         <div class="h"><b>逐球紀錄</b><span class="sub">本場・這位玩家・最新在上</span></div>
@@ -237,9 +237,13 @@ td.x{text-align:right;white-space:nowrap}
 
 <script>
 (() => {
-  const VERSION = "2026-11-10j";
+  const VERSION = "2026-11-10k";
   const $ = id => document.getElementById(id);
   const RES = { strike: "好球", ball: "壞球", foul: "界外", in_play: "擊出" };
+  // 揮空的帶外球：照規則記好球（球數才對得上），畫面上標成「追打壞球」
+  const isChase = p => p && p.result === "strike" && p.x_norm != null && p.y_norm != null
+    && (p.x_norm < 0 || p.x_norm > 1 || p.y_norm < 0 || p.y_norm > 1);
+  const resName = p => isChase(p) ? "追打壞球" : (RES[p.result] || p.result || "");
   const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const ls = { get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
 
@@ -262,7 +266,7 @@ td.x{text-align:right;white-space:nowrap}
     return view.cells.map(c => {
       const id = idp ? ` id="${idp}${c.zone}"` : "";
       if (!c.n) return `<div class="cell"${id}><span class="p">—</span></div>`;
-      const tag = c.out_pct >= 50 ? `<span class="tag ball">帶外 ${c.out_pct}%</span>` : `<span class="tag strike">帶外 ${c.out_pct}%</span>`;
+      const tag = c.out_pct >= 50 ? `<span class="tag ball">壞球率 ${c.out_pct}%</span>` : `<span class="tag strike">壞球率 ${c.out_pct}%</span>`;
       return `<div class="cell"${id} style="background:${heat(c.n / max)}"><span class="p">${c.pct}%</span>${tag}</div>`;
     }).join("");
   }
@@ -331,7 +335,7 @@ td.x{text-align:right;white-space:nowrap}
     $("liveSub").textContent = live ? `本場・自動跟著目前投球的玩家：${live.tag}` : "本場・等對方開始投球";
     $("liveStats").innerHTML = live ? [
       ["本場", `${live.total} 球`], ["全部場次", `${live.total_all} 球`],
-      ["帶外", live.out_pct == null ? "—" : live.out_pct + "%"], ["追打率", live.chase_pct == null ? "—" : live.chase_pct + "%"],
+      ["壞球率", live.out_pct == null ? "—" : live.out_pct + "%"], ["追打率", live.chase_pct == null ? "—" : live.chase_pct + "%"],
     ].map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${v}</span></div>`).join("") : "";
     $("lGrid").innerHTML = live && live.total ? gridHTML(live, "lz") : '<div class="empty" style="grid-column:1/-1">這位投手本場還沒有紀錄</div>';
     decorateLast(live);
@@ -344,7 +348,7 @@ td.x{text-align:right;white-space:nowrap}
           <input name="raw" value="${esc(p.pitch_raw || "")}" placeholder="球種" aria-label="球種">
           <button class="btn sm" type="submit">存</button><button class="btn sm" type="button" data-cancel="1">取消</button></form></td></tr>` : "";
       return `<tr><td>${p.inning}${esc(p.half)}</td><td>${cnt}</td><td>${String(p.zone) === "0" ? "不明（漏記）" : esc(p.zone) + " 號"}</td><td>${esc(p.pitch_raw || "—")}</td>
-        <td class="r ${esc(p.result)}">${RES[p.result] || esc(p.result)}</td>
+        <td class="r ${isChase(p) ? "chase" : esc(p.result)}">${esc(resName(p))}</td>
         <td class="x"><button class="ib" data-edit="${p.id}" aria-label="修改">改</button> <button class="ib" data-del="${p.id}" aria-label="刪除">✕</button></td></tr>${edit}`;
     }).join("") : '<tr><td colspan="6" class="empty">尚無紀錄</td></tr>';
   }
@@ -355,11 +359,11 @@ td.x{text-align:right;white-space:nowrap}
     const lp = st.lastPitch;
     if (!lp || !live || lp.tag !== live.tag) return;
     const cell = $("lz" + lp.zone); if (!cell) return;
-    cell.style.setProperty("--k", KCOL[lp.result] || "#4EA3FF");
+    cell.style.setProperty("--k", lp.chase ? "#FFB547" : (KCOL[lp.result] || "#4EA3FF"));
     const el = (performance.now() - lp.t) / 1000;
     if (el < 1.5) {
       const d = `animation-delay:-${el.toFixed(2)}s`;
-      cell.insertAdjacentHTML("beforeend", `<span class="c-lock" style="${d}"><i></i><i></i><i></i><i></i></span><span class="c-chip" style="${d}">${RES[lp.result] || ""}${lp.pitch ? "・" + esc(lp.pitch) : ""}</span>`);
+      cell.insertAdjacentHTML("beforeend", `<span class="c-lock" style="${d}"><i></i><i></i><i></i><i></i></span><span class="c-chip" style="${d}">${lp.chase ? "追打壞球" : (RES[lp.result] || "")}${lp.pitch ? "・" + esc(lp.pitch) : ""}</span>`);
       setTimeout(() => { if (st.data) { $("lGrid").innerHTML = gridHTML(st.data.live, "lz"); decorateLast(st.data.live); } }, Math.max(0, (1.55 - el) * 1000));
     } else {
       cell.insertAdjacentHTML("beforeend", `<span class="lastb">● 上一球</span>`);
@@ -373,7 +377,7 @@ td.x{text-align:right;white-space:nowrap}
     ((pr && pr.zones) || []).forEach((z, i) => { rank[z.zone] = { i: i + 1, z }; });
     $("mini").innerHTML = [1,2,3,4,5,6,7,8,9].map(n => {
       const r = rank[String(n)];
-      return r ? `<div class="r${r.i}"><span class="p">${r.z.pct}%</span><span class="t">帶外 ${r.z.out_pct}%</span></div>` : "<div></div>";
+      return r ? `<div class="r${r.i}"><span class="p">${r.z.pct}%</span><span class="t">壞球率 ${r.z.out_pct}%</span></div>` : "<div></div>";
     }).join("");
     const types = (pr && pr.types) || [];
     $("predTypes").innerHTML = types.map((t, i) => `<span class="chip${i === 0 ? " top" : ""}">${esc(t.name)} ${t.pct}%</span>`).join("");
@@ -405,7 +409,7 @@ td.x{text-align:right;white-space:nowrap}
     $("pGrid").innerHTML = v.total ? gridHTML(v) : '<div class="empty" style="grid-column:1/-1">這個範圍沒有紀錄</div>';
     $("pTypes").innerHTML = (v.types || []).slice(0, 5).map(t => `<span class="chip lite">${esc(t.name)} <b>${t.pct}%</b></span>`).join("");
     $("pSum").textContent = `${v.tag}・${st.pitcher === "all" ? "全部投手" : st.pitcher}・${st.scope === "current" ? "本場" : v.games + " 場"} ${v.total} 球`
-      + (v.out_pct != null ? `・帶外 ${v.out_pct}%` : "") + (v.chase_pct != null ? `・追打率 ${v.chase_pct}%` : "");
+      + (v.out_pct != null ? `・壞球率 ${v.out_pct}%` : "") + (v.chase_pct != null ? `・追打率 ${v.chase_pct}%` : "");
   }
 
   // 事件
@@ -453,7 +457,7 @@ td.x{text-align:right;white-space:nowrap}
         }
         if (m.type === "pitch" && m.payload) {
           const p = m.payload;
-          st.lastPitch = { zone: String(p.zone), result: p.result, pitch: p.pitch_raw || "", tag: p.opponent_tag, t: performance.now() };
+          st.lastPitch = { zone: String(p.zone), result: p.result, chase: isChase(p), pitch: p.pitch_raw || "", tag: p.opponent_tag, t: performance.now() };
           if (st.data && st.data.live) { $("lGrid").innerHTML = gridHTML(st.data.live, "lz"); decorateLast(st.data.live); }
         }
         if (m.type !== "status" && m.type !== "hello") load();
