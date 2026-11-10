@@ -55,7 +55,7 @@ class PendingPitch:
     strikes_before: Optional[int]
     missing_frames: int = 0
     fielding_cut_frames: int = 0
-    # 鏡頭離開打擊畫面的「秒數」（2026-11-10n：改用秒數判斷擊出／界外，主程式偶爾卡住時張數會算少）
+    # 鏡頭離開打擊畫面的「秒數」（2026-11-10o：改用秒數判斷擊出／界外，主程式偶爾卡住時張數會算少）
     fielding_cut_sec: float = 0.0
     post_marker_frames: int = 0
     marker_gone: bool = False
@@ -76,7 +76,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10n"
+APP_VERSION = "2026-11-10o"
 
 
 @dataclass
@@ -222,7 +222,7 @@ class GameSessionTracker:
         self._label_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-label")
         self._jobs: Dict[str, Any] = {}
         self._job_seq: int = 0
-        # 背景 OCR 排程（2026-11-10n）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
+        # 背景 OCR 排程（2026-11-10o）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
         self._wants: Dict[str, Tuple[Any, tuple, dict]] = {}
         self._bg_running: bool = False
         self._bg_free_since: float = -999.0
@@ -787,17 +787,23 @@ class GameSessionTracker:
         if new_top is None and new_bot is None:
             self._team_change_cand = None
             self._team_change_streak = 0
-            # 第一次讀到、或補上原本缺的那一隊
+            # 第一次讀到、或補上原本缺的那一隊 → 這一場還沒對應到 ID 的球（「對手1」）一起改正
+            filled = False
             if top and not cur_top:
                 self.team_names["top"] = top
+                filled = True
             if bot and not cur_bot:
                 self.team_names["bottom"] = bot
+                filled = True
+            if filled:
+                self._retag_current_game("讀到玩家 ID")
             return
         if not cur_top and not cur_bot:
             if top:
                 self.team_names["top"] = top
             if bot:
                 self.team_names["bottom"] = bot
+            self._retag_current_game("讀到玩家 ID")
             return
         cand = (tuple(new_top or []), tuple(new_bot or []))
         if self._team_change_cand == cand:
@@ -814,6 +820,15 @@ class GameSessionTracker:
         # 比賽中途不會換人：任何一隊的人全部不一樣＝已經是新的一場（沒看到結算畫面也一樣）
         team_replaced = all_new(new_top, cur_top) or all_new(new_bot, cur_bot)
         old = f"{' / '.join(cur_top)} vs {' / '.join(cur_bot)}"
+        # 2026-11-10o：開局沒多久就「全部換人」多半是一開始讀錯（還看到上一場的畫面），不是新的一場 → 改正 ID、重新對應這場的球
+        young = self._pitches_this_game <= 25 and int(self.inning or 1) <= 2
+        if team_replaced and self._pitches_this_game > 0 and young:
+            team_replaced = False
+            if new_top:
+                self.team_names["top"] = list(new_top)
+            if new_bot:
+                self.team_names["bottom"] = list(new_bot)
+            self._retag_current_game(f"開局 ID 修正（原本 {old}）")
         if team_replaced and self._pitches_this_game > 0:
             print(f"  [對手變了] 有一隊的玩家全部換人（原本 {old}），自動開新的一場", flush=True)
             self.start_new_game()
@@ -829,6 +844,25 @@ class GameSessionTracker:
         print(f"  [玩家 ID 更新] {now}", flush=True)
         self._emit("玩家ID更新", note=f"{old} → {now}")
         self.id_changed = True
+
+    def _retag_current_game(self, why: str) -> None:
+        """依目前的玩家 ID 重新對應這一場已記的球（上半局＝主隊投、下半局＝客隊投；2 對 2 依單雙數局）。"""
+        if not self._pitches_this_game:
+            return
+
+        def tagger(inning, half):
+            side = "bottom" if half == "上" else "top"
+            tag = self._players_for(side, inning)
+            return (tag, self._controller_for(tag)) if tag else None
+
+        try:
+            n = self.store.retag_game(self.game_id, tagger)
+        except Exception as e:
+            print(f"  [重新對應失敗] {e}", flush=True)
+            return
+        if n:
+            print(f"  [重新對應] {why}：這場 {n} 球改到正確的玩家", flush=True)
+            self.corrections.append({"id": None, "result": None, "note": f"重新對應 {n} 球"})
 
     def _parse_team_names(self, names: Dict[str, str]):
         """回傳 (上行玩家列表, 下行玩家列表)。"""
@@ -1029,7 +1063,7 @@ class GameSessionTracker:
         # 0. 比賽結束／新比賽
         #   看到結算畫面（右上藍色「確認BOX」按鈕）→ 停止記錄；
         #   之後要同時看到「1 局上」且「比分 0:0」連續兩次，才自動開新的一場。
-        #   2026-11-10n：比賽中偶爾有藍色長方形（彈出視窗等）被當成按鈕 → 整場後半停止記錄。
+        #   2026-11-10o：比賽中偶爾有藍色長方形（彈出視窗等）被當成按鈕 → 整場後半停止記錄。
         #   改成連續 3 次都看到才算結束；結束後若又看到「打擊畫面＋不是 1 局上 0:0」連續兩次 → 判斷是誤判，接著記同一場。
         if not self.game_over:
             if not sb.valid and not batting_cam and self._frame_idx % 15 == 7:
@@ -1215,7 +1249,7 @@ class GameSessionTracker:
         done, out = self._take("info")
         res = None
         if done and out:
-            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10n）：
+            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10o）：
             # 以前在這空檔讀到下半局的投手，被記到另一隊 → 整場兩隊投手對調、打者讀不到、一直重讀卡 CPU。
             # 擷取當下記分板的打擊方 ≠ 目前認定的打擊方，或現在記分板已經換邊 → 這次讀到的名字不用。
             row_cap, res = out
@@ -1466,7 +1500,7 @@ class GameSessionTracker:
                         p.label_checked = True
                         p.label_ok = False
 
-            # 先記錄、晚點補球種球速（2026-11-10n）：
+            # 先記錄、晚點補球種球速（2026-11-10o）：
             #   ⊗ 一定是壞球 → 不等 OCR；◎ 旁邊的標籤用圖形比對認出「STRIKE」字樣就算好球 → 也不等 OCR。
             #   OCR 讀完後由 _poll_label_fill 補進同一筆。圖形比對認不出來時才照舊等 OCR 確認。
             if bd.kind == "bullseye" and bd.has_label and not p.label_checked and p.tpl_word is None:

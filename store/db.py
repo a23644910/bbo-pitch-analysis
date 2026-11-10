@@ -97,6 +97,7 @@ class PitchStore:
                 conn.execute("ALTER TABLE pitches ADD COLUMN controller TEXT")
                 have.add("controller")
             self._label_20261110(conn)
+            self._fix_20261111(conn)
             for col in self.ENV_COLUMNS:
                 if col not in have:
                     typ = "INTEGER" if col in ("wind_angle", "wind_speed") else ("REAL" if col == "energy" else "TEXT")
@@ -125,6 +126,48 @@ class PitchStore:
             except Exception:
                 pass
         conn.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('label_20261110', ?)", (str(len(dead)),))
+
+    @staticmethod
+    def _fix_20261111(conn) -> None:
+        """11/10 晚 2 對 2：開局 ID 讀錯被拆成兩場、少數球記成「對手1」→ 併回並改正（只做一次，只對到那幾場）。"""
+        if conn.execute("SELECT 1 FROM meta WHERE k='fix_20261111'").fetchone():
+            return
+        fixes = [
+            ("game_20261110_224520", "game_20261110_225132", "上", 0, "真豆花的少女"),
+            ("game_20261110_234538", "game_20261110_234608", "上", 0, "老虎YAN"),
+            ("game_20261110_215624", "game_20261110_215624", "上", 1, "561"),
+            ("game_20261110_234608", "game_20261110_234608", "下", 0, "KDBear"),
+        ]
+        n = 0
+        for src, dst, half, parity, tag in fixes:
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM pitches WHERE game_id=? AND half=? AND (inning-1)%2=? AND (game_id!=? OR opponent_tag='對手1')",
+                (src, half, parity, dst))]
+            for pid in ids:
+                conn.execute("UPDATE pitches SET game_id=?, opponent_tag=?, controller='human' WHERE id=?", (dst, tag, pid))
+                try:
+                    conn.execute("DELETE FROM predictions WHERE pitch_id=?", (pid,))
+                except Exception:
+                    pass
+            n += len(ids)
+        conn.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('fix_20261111', ?)", (str(n),))
+
+    def retag_game(self, game_id: str, tagger) -> int:
+        """整場重新對應投球玩家：tagger(inning, half) → (玩家 ID, 'cpu'/'human') 或 None。"""
+        n = 0
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, inning, half, opponent_tag, controller FROM pitches WHERE game_id=?", (game_id,)).fetchall()
+            for r in rows:
+                t = tagger(r["inning"], r["half"])
+                if not t or not t[0] or (t[0] == r["opponent_tag"] and t[1] == r["controller"]):
+                    continue
+                conn.execute("UPDATE pitches SET opponent_tag=?, controller=? WHERE id=?", (t[0], t[1], r["id"]))
+                try:
+                    conn.execute("DELETE FROM predictions WHERE pitch_id=?", (r["id"],))
+                except Exception:
+                    pass
+                n += 1
+        return n
 
     def set_game_controller(self, game_id: str, controller: Optional[str], only_tag: Optional[str] = None) -> int:
         """把一場（或其中某位玩家）的球改標成電腦／真人。"""
