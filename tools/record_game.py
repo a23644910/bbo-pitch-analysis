@@ -6,7 +6,7 @@
 - 同名 .csv：每一張畫面實際被截到的時間（毫秒），用來精準算球速
 - 存在 data\\trajectory\\<日期時間>.mp4
 
-用法：雙擊「4_軌跡錄影.bat」，開始後在黑色視窗按 Enter 結束（或錄滿 30 分鐘自動停）。
+用法：雙擊「4_軌跡錄影.bat」。看到比賽結算畫面（確認BOX）會自動停止；也可以在黑色視窗按 Enter 結束；最長錄 2 小時。
 可以同時開著分析程式；如果遊戲明顯變卡，錄影時先把分析程式關掉。
 """
 from __future__ import annotations
@@ -34,7 +34,10 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 OUT_W, OUT_H, FPS = 1920, 1080, 60
-MAX_SEC = 30 * 60
+MAX_SEC = 2 * 60 * 60
+GAMEOVER_CHECK_EVERY = 30   # 每 0.5 秒看一次是不是結算畫面
+GAMEOVER_NEED = 4           # 連續 4 次（約 2 秒）才算比賽結束
+MIN_SEC_BEFORE_AUTOSTOP = 120
 
 
 def ffmpeg_exe() -> str:
@@ -98,7 +101,9 @@ def main() -> int:
     stop = threading.Event()
     threading.Thread(target=lambda: (input(), stop.set()), daemon=True).start()
     print(f"開始錄影（{enc_name}）→ {mp4.name}")
-    print("錄影中…按 Enter 結束")
+    print("錄影中…比賽結束（結算畫面）會自動停止，也可以按 Enter 結束")
+    from detect.gameover import has_confirm_box_button
+    over_streak = 0
 
     t0 = time.perf_counter()
     n = 0
@@ -120,6 +125,14 @@ def main() -> int:
                     break
                 fcsv.write(f"{n},{ts:.1f}\n")
                 n += 1
+                if n % GAMEOVER_CHECK_EVERY == 0 and ts / 1000.0 > MIN_SEC_BEFORE_AUTOSTOP:
+                    try:
+                        over_streak = over_streak + 1 if has_confirm_box_button(frame) else 0
+                    except Exception:
+                        over_streak = 0
+                    if over_streak >= GAMEOVER_NEED:
+                        print("偵測到比賽結算畫面，自動停止錄影")
+                        break
                 if n % (FPS * 10) == 0:
                     real = n / max(0.001, time.perf_counter() - t0)
                     if real < FPS * 0.9:
@@ -136,8 +149,10 @@ def main() -> int:
     dur = time.perf_counter() - t0
     size = mp4.stat().st_size / 1024 / 1024 if mp4.exists() else 0
     print(f"完成：{mp4}（{dur:.0f} 秒、{n} 張、{size:.0f} MB）")
-    if slow:
-        print("注意：錄影時實際張數低於每秒 54 張，電腦可能太忙；下次錄影時先關掉分析程式和其他程式")
+    avg = n / max(0.001, dur)
+    print(f"平均每秒 {avg:.1f} 張")
+    if avg < 50:
+        print("注意：整段平均低於每秒 50 張，電腦可能太忙；遊戲明顯變卡時再關掉其他程式")
     return 0
 
 

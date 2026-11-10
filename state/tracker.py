@@ -74,7 +74,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10i"
+APP_VERSION = "2026-11-10j"
 
 
 @dataclass
@@ -218,13 +218,17 @@ class GameSessionTracker:
         self._label_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-label")
         self._jobs: Dict[str, Any] = {}
         self._job_seq: int = 0
-        # 背景 OCR 排程（2026-11-10i）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
+        # 背景 OCR 排程（2026-11-10j）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
         self._wants: Dict[str, Tuple[Any, tuple, dict]] = {}
         self._bg_running: bool = False
         self._bg_free_since: float = -999.0
         # 名字讀不到時的重試間隔（連續失敗就放慢，不要每秒重讀）
         self._info_fail: int = 0
         self._info_next_ts: float = 0.0
+        # 換邊時間、舊畫面防護擋下的名字（連續擋到同一個 → 可能是記錯隊，要自動改正）
+        self._now: float = 0.0
+        self._side_change_ts: float = -999.0
+        self._stale_seen: Optional[Tuple[str, str, int]] = None  # (打擊方, 投手, 次數)
         # 先記錄、晚點補上球種球速：標籤 OCR 工作 → 已記錄的那一球
         self._label_fill: Dict[str, Tuple[int, float]] = {}
         self._seen_unrecorded: int = 0
@@ -354,6 +358,8 @@ class GameSessionTracker:
         self._force_teams = True
         self._info_fail = 0
         self._info_next_ts = 0.0
+        self._side_change_ts = self._now
+        self._stale_seen = None
 
     _RESULT_NAME = {"foul": "界外", "in_play": "擊出", "strike": "好球", "ball": "壞球"}
 
@@ -577,6 +583,10 @@ class GameSessionTracker:
             return True
         self._wants[key] = (fn, args, kwargs)  # 同一件排隊中就換成最新的畫面
         return True
+
+    def _read_info_tagged(self, img: np.ndarray, row: str, force: bool):
+        """讀右下角名字，連同「擷取當下記分板的打擊方」一起回傳（換邊時用來丟掉不可靠的結果）。"""
+        return row, self.ocr_engine.read_info_panel(img, self.config, force=force)
 
     def _pitch_quiet(self, ts: float) -> bool:
         """投球前後（能量條剛出現、畫面上有落點、正在判定、標籤 OCR 在跑）先不跑別的 OCR。"""
@@ -949,6 +959,7 @@ class GameSessionTracker:
         """
         self._frame_idx += 1
         self._frame_reject = ""
+        self._now = ts_sec
         self._dispatch_bg(ts_sec)
         if self._label_fill:
             self._poll_label_fill(ts_sec)
@@ -1138,8 +1149,21 @@ class GameSessionTracker:
         if done:
             self._apply_team_names(names)
 
-        done, res = self._take("info")
-        if done and res:
+        done, out = self._take("info")
+        res = None
+        if done and out:
+            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10j）：
+            # 以前在這空檔讀到下半局的投手，被記到另一隊 → 整場兩隊投手對調、打者讀不到、一直重讀卡 CPU。
+            # 擷取當下記分板的打擊方 ≠ 目前認定的打擊方，或現在記分板已經換邊 → 這次讀到的名字不用。
+            row_cap, res = out
+            cur = self._last_sb
+            switching = (
+                cur is not None and cur.valid and cur.batting_row in ("top", "bottom")
+                and cur.batting_row != self.stable_batting_row
+            )
+            if switching or (row_cap in ("top", "bottom") and row_cap != self.stable_batting_row):
+                res = None
+        if res:
             new_batter, new_pitcher = res
             if new_pitcher:
                 new_pitcher = self._canon_pitcher(new_pitcher)
@@ -1151,7 +1175,18 @@ class GameSessionTracker:
                 and new_pitcher in (self._pitcher_by_side.get(bat_row), self._pitcher_by_side.get(bat_row + "0"), self._pitcher_by_side.get(bat_row + "1"))
                 and new_pitcher != self._pitcher_by_side.get(self._pkey(self._other(bat_row)))
             ):
-                new_batter, new_pitcher = None, None
+                # 舊畫面只會停留一兩秒；換邊 5 秒後還連續讀到 3 次同一個投手 → 是之前記錯隊，改正記憶並採用
+                seen = self._stale_seen
+                n = seen[2] + 1 if seen and seen[:2] == (bat_row, new_pitcher) else 1
+                self._stale_seen = (bat_row, new_pitcher, n)
+                if n >= 3 and ts_sec - self._side_change_ts > 5.0:
+                    for k in (bat_row, bat_row + "0", bat_row + "1"):
+                        if self._pitcher_by_side.get(k) == new_pitcher:
+                            del self._pitcher_by_side[k]
+                    self._stale_seen = None
+                    print(f"  [自動改正] 投手 {new_pitcher} 之前記錯隊，已改正", flush=True)
+                else:
+                    new_batter, new_pitcher = None, None
             if self._force_names and new_pitcher:
                 self._force_names = False
                 self._info_fail = 0
@@ -1195,7 +1230,7 @@ class GameSessionTracker:
 
         if sb.valid and batting_cam and self._frame_idx % 8 == 1 and ts_sec >= self._info_next_ts:
             cb = client_bgr.copy()
-            self._submit("info", self.ocr_engine.read_info_panel, cb, self.config, force=self._force_names)
+            self._submit("info", self._read_info_tagged, cb, sb.batting_row, self._force_names)
             self._submit("inning", self.ocr_engine.read_inning_number, cb, self.config)
             self._submit("tab", self.ocr_engine.read_tab_panel_if_visible, cb, self.config, store=self.store)
 
@@ -1367,7 +1402,7 @@ class GameSessionTracker:
                         p.label_checked = True
                         p.label_ok = False
 
-            # 先記錄、晚點補球種球速（2026-11-10i）：
+            # 先記錄、晚點補球種球速（2026-11-10j）：
             #   ⊗ 一定是壞球 → 不等 OCR；◎ 旁邊的標籤用圖形比對認出「STRIKE」字樣就算好球 → 也不等 OCR。
             #   OCR 讀完後由 _poll_label_fill 補進同一筆。圖形比對認不出來時才照舊等 OCR 確認。
             if bd.kind == "bullseye" and bd.has_label and not p.label_checked and p.tpl_word is None:
