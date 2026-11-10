@@ -71,7 +71,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10g"
+APP_VERSION = "2026-11-10h"
 
 
 @dataclass

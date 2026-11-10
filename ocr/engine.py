@@ -35,7 +35,11 @@ from store.db import PitchStore
 
 
 SPEED_RE = re.compile(r"(\d{2,3}(?:\.\d)?)\s*(?:[Kk][Mm]|[Kk]m/h|km/h)?")
-PLAYER_NAME_RE = re.compile(r"(\d{2})\s*([A-Za-z\u4e00-\u9fff\.．\s\-]+)")
+# 名字可含「·」（外籍球員，如「傑米·羅麥」）；中文名中間的小字常被讀成數字或問號（如「鄭7哲」），夾在兩個中文字之間時也接受
+PLAYER_NAME_RE = re.compile(
+    r"(\d{2})\s*((?:[A-Za-z\u4e00-\u9fff\.．·・‧•\s\-]|(?<=[\u4e00-\u9fff])[0-9?？](?=[\u4e00-\u9fff]))+)"
+)
+_NAME_DOT = str.maketrans({"・": "·", "‧": "·", "•": "·"})
 
 
 SIMP_TO_TRAD_NAMES = str.maketrans(
@@ -247,7 +251,7 @@ class BBOOCREngine:
             full,
             flags=re.IGNORECASE,
         )
-        cleaned = re.sub(r"\b\d+\s*[WL]\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b\d+\s*[WL]\b(?!\s*\.)", " ", cleaned, flags=re.IGNORECASE)  # 勝敗場數「0W 0L」；「24 L. Webb」的 L. 是名字縮寫不能刪
         cleaned = re.sub(r"\d+\.\d+", " ", cleaned)
         # Remove leading single-digit batting order if followed by 2-digit year (e.g. "1 11E.波尼法西")
         cleaned = re.sub(r"^\s*[1-9]\s+(?=\d{2})", "", cleaned)
@@ -265,6 +269,7 @@ class BBOOCREngine:
                 flags=re.IGNORECASE,
             ).strip()
             name = re.sub(r"(?<=[\u4e00-\u9fff])\s+[A-Za-z0-9\s]{1,12}$", "", name).strip()
+            name = re.sub(r"\s*\u00b7\s*", "\u00b7", name.translate(_NAME_DOT)).strip("\u00b7").strip()
             if len(name) >= 2:
                 return f"{year} {name}"
         return ""
@@ -321,8 +326,8 @@ class BBOOCREngine:
             self._last_batter_hash = b_hash
             b_lines = self.run_ocr_lines(batter_strip, upscale=2.5)
             b_name = self._clean_player_text(b_lines, is_pitcher=False)
-            if b_name:
-                self._last_batter_name = b_name
+            # 換了人（畫面變了）卻讀不出名字 → 回傳空的，不要沿用上一個人的名字
+            self._last_batter_name = b_name
 
         if (
             force
@@ -332,8 +337,9 @@ class BBOOCREngine:
             self._last_pitcher_hash = p_hash
             p_lines = self.run_ocr_lines(pitcher_strip, upscale=2.5)
             p_name = self._clean_player_text(p_lines, is_pitcher=True)
-            if p_name:
-                self._last_pitcher_name = p_name
+            # 以前讀不出來就沿用上一個投手（上半局對方的投手）→ 被「舊畫面」防護擋掉，連打者一起清空，
+            # 自己防守的半局整局都沒有名字。現在讀不出來就回傳空的。
+            self._last_pitcher_name = p_name
 
         return self._last_batter_name, self._last_pitcher_name
 
