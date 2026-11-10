@@ -327,6 +327,7 @@ class PitchStore:
         result: Optional[str] = None,
         opponent_tag: Optional[str] = None,
         note: Optional[str] = None,
+        speed_kmh: Optional[float] = None,
     ) -> bool:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM pitches WHERE id = ?", (pitch_id,)).fetchone()
@@ -342,14 +343,15 @@ class PitchStore:
             new_res = result if result is not None else row["result"]
             new_opp = opponent_tag if opponent_tag is not None else row["opponent_tag"]
             new_note = note if note is not None else row["note"]
+            new_speed = speed_kmh if speed_kmh is not None else row["speed_kmh"]
 
             conn.execute(
                 """
                 UPDATE pitches
-                SET pitch_raw = ?, pitch_group = ?, zone = ?, result = ?, opponent_tag = ?, note = ?
+                SET pitch_raw = ?, pitch_group = ?, zone = ?, result = ?, opponent_tag = ?, note = ?, speed_kmh = ?
                 WHERE id = ?
                 """,
-                (new_raw, new_grp, new_zone, new_res, new_opp, new_note, pitch_id),
+                (new_raw, new_grp, new_zone, new_res, new_opp, new_note, new_speed, pitch_id),
             )
             return True
 

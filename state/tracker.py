@@ -31,6 +31,7 @@ from detect.markers import MarkerDetection, detect_pitch_marker, detect_label_on
 from detect.scoreboard import ScoreboardState, read_scoreboard
 from detect.environment import read_environment, read_energy, wind_speed_crop
 from detect.gameover import has_confirm_box_button
+from detect.lowball import find_label_text
 from ocr.engine import BBOOCREngine
 from ocr.phash import classify_pitch_group, levenshtein_distance
 import re
@@ -68,10 +69,12 @@ class PendingPitch:
     # 標籤 OCR 改在背景跑，不卡住畫面擷取
     label_job: Optional[str] = None
     label_submit_ts: float = 0.0
+    # 標籤字樣（BALL / STRIKE）用圖形比對先確認，不用等 OCR
+    tpl_word: Optional[str] = None
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10h"
+APP_VERSION = "2026-11-10i"
 
 
 @dataclass
@@ -215,6 +218,15 @@ class GameSessionTracker:
         self._label_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-label")
         self._jobs: Dict[str, Any] = {}
         self._job_seq: int = 0
+        # 背景 OCR 排程（2026-11-10i）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
+        self._wants: Dict[str, Tuple[Any, tuple, dict]] = {}
+        self._bg_running: bool = False
+        self._bg_free_since: float = -999.0
+        # 名字讀不到時的重試間隔（連續失敗就放慢，不要每秒重讀）
+        self._info_fail: int = 0
+        self._info_next_ts: float = 0.0
+        # 先記錄、晚點補上球種球速：標籤 OCR 工作 → 已記錄的那一球
+        self._label_fill: Dict[str, Tuple[int, float]] = {}
         self._seen_unrecorded: int = 0
 
         self.snapshots_dir = snapshots_dir or (
@@ -340,6 +352,8 @@ class GameSessionTracker:
         self.batter = ""
         self._force_names = True
         self._force_teams = True
+        self._info_fail = 0
+        self._info_next_ts = 0.0
 
     _RESULT_NAME = {"foul": "界外", "in_play": "擊出", "strike": "好球", "ball": "壞球"}
 
@@ -547,14 +561,75 @@ class GameSessionTracker:
         self.corrections.append({"id": hc["id"], "result": new_result, "note": note_add})
         print(f"  [自動修正] #{hc['id']} {note_add}", flush=True)
 
+    _BG_ORDER = ("newgame", "teams", "info", "inning", "wind", "tab")
+    _BG_GAP = 0.4  # 兩件背景 OCR 之間至少空這麼久，讓主程式喘口氣
+
     def _submit(self, key: str, fn, *args, label: bool = False, **kwargs) -> bool:
-        """背景執行一件 OCR 工作；同名工作還在跑就不重複送。"""
+        """
+        背景執行一件 OCR 工作；同名工作還在跑就不重複送。
+        標籤（球種球速）馬上跑；其他（ID、名字、局數…）先排隊，由 _dispatch_bg 一次放一件、投球時暫停。
+        """
         f = self._jobs.get(key)
         if f is not None and not f.done():
             return False
-        pool = self._label_pool if label else self._pool
-        self._jobs[key] = pool.submit(fn, *args, **kwargs)
+        if label:
+            self._jobs[key] = self._label_pool.submit(fn, *args, **kwargs)
+            return True
+        self._wants[key] = (fn, args, kwargs)  # 同一件排隊中就換成最新的畫面
         return True
+
+    def _pitch_quiet(self, ts: float) -> bool:
+        """投球前後（能量條剛出現、畫面上有落點、正在判定、標籤 OCR 在跑）先不跑別的 OCR。"""
+        if self._pending is not None or self._last_det is not None:
+            return True
+        if any(k.startswith("label") and not f.done() for k, f in self._jobs.items()):
+            return True
+        if self._energy is not None and ts - self._energy[1] < 1.5:
+            return True
+        return False
+
+    def _dispatch_bg(self, ts: float) -> None:
+        running = any(not f.done() for k, f in self._jobs.items() if not k.startswith("label"))
+        if running:
+            self._bg_running = True
+            return
+        if self._bg_running:
+            self._bg_running = False
+            self._bg_free_since = ts
+        if not self._wants or ts - self._bg_free_since < self._BG_GAP or self._pitch_quiet(ts):
+            return
+        order = list(self._BG_ORDER) + [k for k in self._wants if k not in self._BG_ORDER]
+        for key in order:
+            if key in self._wants:
+                fn, args, kwargs = self._wants.pop(key)
+                self._jobs[key] = self._pool.submit(fn, *args, **kwargs)
+                self._bg_running = True
+                if key == "teams" and self.row_status in ("searching", "not_found"):
+                    self._row_tries += 1
+                return
+
+    def _poll_label_fill(self, ts: float) -> None:
+        """先記錄的球：標籤 OCR 讀完後補上球種、球速。"""
+        for job, (pid, t0) in list(self._label_fill.items()):
+            done, res = self._take(job)
+            if not done:
+                if ts - t0 > 10.0:
+                    self._label_fill.pop(job, None)
+                continue
+            self._label_fill.pop(job, None)
+            if res is None or not (res.pitch_raw or res.speed_kmh):
+                continue
+            grp = res.pitch_group or classify_pitch_group(res.pitch_raw)
+            try:
+                self.store.update_pitch(pid, pitch_raw=res.pitch_raw, pitch_group=grp, speed_kmh=res.speed_kmh)
+            except Exception as e:
+                print(f"  [補球種失敗] {e}", flush=True)
+                continue
+            lr = self.last_recorded_pitch
+            if lr and lr.get("id") == pid:
+                lr["pitch_raw"], lr["pitch_group"], lr["speed_kmh"] = res.pitch_raw, grp, res.speed_kmh
+            self.corrections.append({"id": pid, "result": None, "note": "補上球種球速"})
+            print(f"  [補上] #{pid} 球種:{res.pitch_raw or '-'} 球速:{res.speed_kmh or '-'}", flush=True)
 
     def _take(self, key: str):
         """取回背景工作結果：(是否完成, 結果)。"""
@@ -763,8 +838,7 @@ class GameSessionTracker:
 
     def _try_detect_row(self, client_bgr: np.ndarray) -> None:
         """送出背景工作讀雙方名字；結果在 _apply_team_names 處理。"""
-        if self._submit("teams", self.ocr_engine.read_team_names, client_bgr.copy(), self.config):
-            self._row_tries += 1
+        self._submit("teams", self.ocr_engine.read_team_names, client_bgr.copy(), self.config)
 
     def _apply_team_names(self, names: Optional[Dict[str, str]]) -> None:
         if not names:
@@ -875,6 +949,9 @@ class GameSessionTracker:
         """
         self._frame_idx += 1
         self._frame_reject = ""
+        self._dispatch_bg(ts_sec)
+        if self._label_fill:
+            self._poll_label_fill(ts_sec)
 
         # 1. Read scoreboard (fast pixel patch sampling)
         sb = read_scoreboard(client_bgr, self.config, current_inning=self.inning)
@@ -912,6 +989,7 @@ class GameSessionTracker:
                     self._newgame_streak = 0
                     print("  [比賽結束] 偵測到結算畫面（確認BOX），停止記錄，等待新比賽", flush=True)
         else:
+            self._last_det = None
             done, res = self._take("newgame")
             if sb.valid and self._frame_idx % 15 == 7 and not self._busy("newgame"):
                 cb = client_bgr.copy()
@@ -1076,6 +1154,15 @@ class GameSessionTracker:
                 new_batter, new_pitcher = None, None
             if self._force_names and new_pitcher:
                 self._force_names = False
+                self._info_fail = 0
+                self._info_next_ts = 0.0
+            elif self._force_names and not new_pitcher:
+                # 投手名字一直讀不到（例如名字有特殊小字）：放慢重讀，連續 3 次失敗後改成「畫面有變才讀」
+                self._info_fail += 1
+                if self._info_fail >= 3:
+                    self._force_names = False
+                else:
+                    self._info_next_ts = ts_sec + (1.0, 2.0)[self._info_fail - 1]
             if new_batter and new_batter != self.batter:
                 if self.batter:
                     # Batter changed -> reset count to 0-0
@@ -1106,7 +1193,7 @@ class GameSessionTracker:
         if done and ws is not None:
             self.env["wind_speed"] = ws
 
-        if sb.valid and batting_cam and self._frame_idx % 8 == 1:
+        if sb.valid and batting_cam and self._frame_idx % 8 == 1 and ts_sec >= self._info_next_ts:
             cb = client_bgr.copy()
             self._submit("info", self.ocr_engine.read_info_panel, cb, self.config, force=self._force_names)
             self._submit("inning", self.ocr_engine.read_inning_number, cb, self.config)
@@ -1280,12 +1367,19 @@ class GameSessionTracker:
                         p.label_checked = True
                         p.label_ok = False
 
+            # 先記錄、晚點補球種球速（2026-11-10i）：
+            #   ⊗ 一定是壞球 → 不等 OCR；◎ 旁邊的標籤用圖形比對認出「STRIKE」字樣就算好球 → 也不等 OCR。
+            #   OCR 讀完後由 _poll_label_fill 補進同一筆。圖形比對認不出來時才照舊等 OCR 確認。
+            if bd.kind == "bullseye" and bd.has_label and not p.label_checked and p.tpl_word is None:
+                tw = find_label_text(client_bgr)
+                if tw is not None:
+                    p.tpl_word = tw[0]
             if bd.kind == "red_x":
-                if needs_label and not p.label_checked:
-                    return None  # 等背景 OCR 讀完球種、球速
                 has_lbl_or_red = True
             elif bd.has_label and not p.label_checked:
-                return None  # 等背景 OCR 確認是不是 STRIKE 標籤
+                if p.tpl_word is None:
+                    return None  # 等背景 OCR 確認是不是 STRIKE 標籤
+                has_lbl_or_red = True
             else:
                 has_lbl_or_red = p.label_ok
 
@@ -1365,10 +1459,7 @@ class GameSessionTracker:
                 if self.require_cursor and not cursor_recent:
                     return None
 
-            # Refresh player names right when a pitch arrives if still empty
-            if not self.batter or not self.pitcher or self._force_names:
-                # 背景讀名字，不卡住；記錄時會用最新讀到的投手
-                self._submit("info", self.ocr_engine.read_info_panel, client_bgr.copy(), self.config, force=True)
+            # （以前這裡會在球剛出現時讀名字，正好跟標籤 OCR 搶 CPU；名字改由一般排程在投球後讀）
 
             self._pending = PendingPitch(
                 pitching_side=self._other(self._row_for_logic()),
@@ -1421,7 +1512,12 @@ class GameSessionTracker:
                     notes.append("顏色與標籤不一致(紅⊗但STRIKE)")
         else:
             # det.kind == "bullseye" (◎)
-            if p.label_checked and p.label_ok and p.ocr_res is not None:
+            if p.tpl_word and not p.label_checked:
+                # 圖形比對已經認出標籤字樣，球種球速等 OCR 讀完再補
+                result = "ball" if p.tpl_word == "BALL" else "strike"
+                if p.tpl_word == "BALL":
+                    notes.append("顏色與標籤不一致(藍◎但BALL)")
+            elif p.label_checked and p.label_ok and p.ocr_res is not None:
                 result = "strike"
                 ocr_res = p.ocr_res
                 pitch_raw = ocr_res.pitch_raw
@@ -1491,6 +1587,9 @@ class GameSessionTracker:
             self._emit("玩家未知", pitch_id=pitch_id)
         record["id"] = pitch_id
         self.last_recorded_pitch = record
+        if p.label_job is not None and not p.label_checked:
+            # 標籤 OCR 還在跑：讀完再補上球種、球速
+            self._label_fill[p.label_job] = (pitch_id, ts_sec)
         self._last_rec_pos = (int(det.cx), int(det.cy), det.kind, ts_sec)
 
         # Stage 5: Update count tracking state
