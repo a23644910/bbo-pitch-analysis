@@ -38,6 +38,8 @@ class SettingsUpdateRequest(BaseModel):
     row_auto: Optional[bool] = None
     my_id: Optional[str] = None
     record_both: Optional[bool] = None
+    cpu_mode: Optional[bool] = None
+    my_auto: Optional[bool] = None
     record_video: Optional[bool] = None
     opponent_tag: Optional[str] = None
     require_cursor: Optional[bool] = None
@@ -256,6 +258,8 @@ def create_app(
                 pass
         if req.record_both is not None:
             tracker.set_record_both(req.record_both)
+        if req.cpu_mode is not None or req.my_auto is not None:
+            tracker.set_play_mode(req.cpu_mode, req.my_auto)
         if req.my_id is not None:
             tracker.set_my_id(req.my_id)
         if req.row_auto:

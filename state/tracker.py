@@ -55,7 +55,7 @@ class PendingPitch:
     strikes_before: Optional[int]
     missing_frames: int = 0
     fielding_cut_frames: int = 0
-    # 鏡頭離開打擊畫面的「秒數」（2026-11-10l：改用秒數判斷擊出／界外，主程式偶爾卡住時張數會算少）
+    # 鏡頭離開打擊畫面的「秒數」（2026-11-10m：改用秒數判斷擊出／界外，主程式偶爾卡住時張數會算少）
     fielding_cut_sec: float = 0.0
     post_marker_frames: int = 0
     marker_gone: bool = False
@@ -76,7 +76,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10l"
+APP_VERSION = "2026-11-10m"
 
 
 @dataclass
@@ -104,6 +104,8 @@ class TrackerStatus:
     row_source: str = ""  # 例如「記分板上行」「AWAY 面板」
     game_over: bool = False  # 看到結算畫面後為 True，停止記錄直到新比賽開始
     record_both: bool = False  # 雙方投球都記錄
+    cpu_mode: bool = False  # 電腦對戰模式
+    my_auto: bool = True  # 1 對 1 我方自動投球
     app_version: str = APP_VERSION
     capture_mode: str = ""  # 前景（截螢幕）／背景（PrintWindow）
     team_top: str = ""  # 記分板上行（先攻）玩家 ID
@@ -220,7 +222,7 @@ class GameSessionTracker:
         self._label_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-label")
         self._jobs: Dict[str, Any] = {}
         self._job_seq: int = 0
-        # 背景 OCR 排程（2026-11-10l）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
+        # 背景 OCR 排程（2026-11-10m）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
         self._wants: Dict[str, Tuple[Any, tuple, dict]] = {}
         self._bg_running: bool = False
         self._bg_free_since: float = -999.0
@@ -477,6 +479,7 @@ class GameSessionTracker:
             "inning": self.inning, "half": self.half, "outs": self.outs,
             "pitcher": self.pitcher or "未知投手",
             "opponent_tag": self._players_for(side, self.inning) or self.opponent_tag,
+            "controller": self._controller_for(self._players_for(side, self.inning) or self.opponent_tag),
             "batter": self.batter or "未知打者",
             "balls_before": tb, "strikes_before": ts_,
             "zone": "0", "x_norm": 0.5, "y_norm": 0.5, "result": kind,
@@ -533,6 +536,7 @@ class GameSessionTracker:
                 "game_id": self.game_id, "ts": datetime.now().isoformat(timespec="seconds"),
                 "inning": rec.get("inning", self.inning), "half": rec.get("half", self.half), "outs": self.outs,
                 "pitcher": rec.get("pitcher", ""), "opponent_tag": rec.get("opponent_tag", ""), "batter": rec.get("batter", ""),
+                "controller": self._controller_for(rec.get("opponent_tag", "")),
                 "balls_before": exp[0], "strikes_before": exp[1],
                 "zone": "0", "x_norm": 0.5, "y_norm": 0.5, "result": missed,
                 "note": f"漏記：記分板球數 {exp[0]}-{exp[1]} → {after[0]}-{after[1]}，落點不明",
@@ -693,6 +697,37 @@ class GameSessionTracker:
             self.config.save()
         except Exception:
             pass
+
+    def _controller_for(self, tag: str) -> str:
+        """這球是電腦還是真人投的：電腦對戰模式＝電腦；2 對 2＝真人；1 對 1 我方＝看「我方自動投球」設定。"""
+        if getattr(self.config, "cpu_mode", False):
+            return "cpu"
+        if len(self.team_names.get("top", [])) >= 2 or len(self.team_names.get("bottom", [])) >= 2:
+            return "human"
+        me = (self.my_id or "").strip().lower()
+        if me and (tag or "").strip().lower() == me:
+            return "cpu" if getattr(self.config, "my_auto", True) else "human"
+        return "human"
+
+    def set_play_mode(self, cpu_mode: Optional[bool] = None, my_auto: Optional[bool] = None) -> None:
+        """網頁設定：電腦對戰模式、我方自動投球。改了之後這一場已記的球也一起改標。"""
+        if cpu_mode is not None:
+            self.config.cpu_mode = bool(cpu_mode)
+        if my_auto is not None:
+            self.config.my_auto = bool(my_auto)
+        try:
+            self.config.save()
+        except Exception:
+            pass
+        try:
+            if self.config.cpu_mode:
+                self.store.set_game_controller(self.game_id, "cpu")
+            else:
+                self.store.set_game_controller(self.game_id, "human")
+                if self.my_id and not (len(self.team_names.get("top", [])) >= 2 or len(self.team_names.get("bottom", [])) >= 2):
+                    self.store.set_game_controller(self.game_id, "cpu" if self.config.my_auto else "human", only_tag=self.my_id)
+        except Exception as e:
+            print(f"  [改標記失敗] {e}", flush=True)
 
     def _players_for(self, side: str, inning: Optional[int] = None) -> str:
         """投球方的玩家 ID。2 對 2：玩家1 投單數局、玩家2 投雙數局。"""
@@ -921,6 +956,8 @@ class GameSessionTracker:
             row_source=str(self.row_source),
             game_over=bool(self.game_over),
             record_both=bool(self.record_both),
+            cpu_mode=bool(getattr(self.config, "cpu_mode", False)),
+            my_auto=bool(getattr(self.config, "my_auto", True)),
             capture_mode=str(self.capture_mode),
             team_top=" / ".join(self.team_names.get("top", [])),
             team_bottom=" / ".join(self.team_names.get("bottom", [])),
@@ -992,7 +1029,7 @@ class GameSessionTracker:
         # 0. 比賽結束／新比賽
         #   看到結算畫面（右上藍色「確認BOX」按鈕）→ 停止記錄；
         #   之後要同時看到「1 局上」且「比分 0:0」連續兩次，才自動開新的一場。
-        #   2026-11-10l：比賽中偶爾有藍色長方形（彈出視窗等）被當成按鈕 → 整場後半停止記錄。
+        #   2026-11-10m：比賽中偶爾有藍色長方形（彈出視窗等）被當成按鈕 → 整場後半停止記錄。
         #   改成連續 3 次都看到才算結束；結束後若又看到「打擊畫面＋不是 1 局上 0:0」連續兩次 → 判斷是誤判，接著記同一場。
         if not self.game_over:
             if not sb.valid and not batting_cam and self._frame_idx % 15 == 7:
@@ -1178,7 +1215,7 @@ class GameSessionTracker:
         done, out = self._take("info")
         res = None
         if done and out:
-            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10l）：
+            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10m）：
             # 以前在這空檔讀到下半局的投手，被記到另一隊 → 整場兩隊投手對調、打者讀不到、一直重讀卡 CPU。
             # 擷取當下記分板的打擊方 ≠ 目前認定的打擊方，或現在記分板已經換邊 → 這次讀到的名字不用。
             row_cap, res = out
@@ -1429,7 +1466,7 @@ class GameSessionTracker:
                         p.label_checked = True
                         p.label_ok = False
 
-            # 先記錄、晚點補球種球速（2026-11-10l）：
+            # 先記錄、晚點補球種球速（2026-11-10m）：
             #   ⊗ 一定是壞球 → 不等 OCR；◎ 旁邊的標籤用圖形比對認出「STRIKE」字樣就算好球 → 也不等 OCR。
             #   OCR 讀完後由 _poll_label_fill 補進同一筆。圖形比對認不出來時才照舊等 OCR 確認。
             if bd.kind == "bullseye" and bd.has_label and not p.label_checked and p.tpl_word is None:
@@ -1621,6 +1658,7 @@ class GameSessionTracker:
             "pitcher": p.pitcher or self.pitcher or "未知投手",
             # 投球方玩家 ID（單人：對方 ID；2 對 2：對方兩位玩家）；讀不到時用手動標籤
             "opponent_tag": self._players_for(p.pitching_side, p.inning) or self.opponent_tag,
+            "controller": self._controller_for(self._players_for(p.pitching_side, p.inning) or self.opponent_tag),
             "batter": p.batter or self.batter or "未知打者",
             "balls_before": p.balls_before,
             "strikes_before": p.strikes_before,

@@ -123,6 +123,10 @@ class CalibrationConfig:
     # 整場錄影（測試用）
     record_video: bool = False
 
+    # 電腦／真人標記（2026-11-10m）：電腦投的球不拿來訓練預測、不算命中率
+    cpu_mode: bool = False   # True：電腦對戰（雙方都是電腦）
+    my_auto: bool = True     # True：1 對 1 時我方是自動投球（2 對 2 一律當真人）
+
     # Color threshold profile
     colors: ColorThresholdProfile = field(default_factory=ColorThresholdProfile)
 
@@ -237,6 +241,8 @@ class CalibrationConfig:
             "my_id": self.my_id,
             "record_both": self.record_both,
             "record_video": self.record_video,
+            "cpu_mode": self.cpu_mode,
+            "my_auto": self.my_auto,
             "colors": asdict(self.colors),
             "save_snapshots": self.save_snapshots,
         }
@@ -267,6 +273,8 @@ class CalibrationConfig:
                 my_id=str(raw.get("my_id", "")),
                 record_both=bool(raw.get("record_both", False)),
                 record_video=bool(raw.get("record_video", False)),
+                cpu_mode=bool(raw.get("cpu_mode", False)),
+                my_auto=bool(raw.get("my_auto", True)),
                 colors=ColorThresholdProfile(**raw.get("colors", {})),
                 save_snapshots=bool(raw.get("save_snapshots", True)),
             )

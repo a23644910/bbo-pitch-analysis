@@ -164,6 +164,16 @@ td.x{text-align:right;white-space:nowrap}
       <div class="seg"><button id="rowAuto">自動</button><button id="rowTop">先攻</button><button id="rowBot">後攻</button></div>
       <span class="sub" id="sideText"></span>
     </div>
+    <div class="row">
+      <label>比賽類型</label>
+      <div class="seg"><button id="modeHuman">真人對戰</button><button id="modeCpu">電腦對戰</button></div>
+      <span class="sub">電腦投的球照樣記錄（軌跡辨識會用），但不拿來訓練預測、不算命中率</span>
+    </div>
+    <div class="row">
+      <label>1 對 1 時我方投球</label>
+      <div class="seg"><button id="myAuto">自動</button><button id="myManual">手動</button></div>
+      <span class="sub">2 對 2 一律當真人</span>
+    </div>
     <div class="row sub" id="accText">預測命中率：尚無資料</div>
     <div class="row sub" id="perfText"></div>
     <div class="row sub" id="modelText"></div>
@@ -237,7 +247,7 @@ td.x{text-align:right;white-space:nowrap}
 
 <script>
 (() => {
-  const VERSION = "2026-11-10l";
+  const VERSION = "2026-11-10m";
   const $ = id => document.getElementById(id);
   const RES = { strike: "好球", ball: "壞球", foul: "界外", in_play: "擊出" };
   // 揮空的帶外球：照規則記好球（球數才對得上），畫面上標成「追打壞球」
@@ -317,13 +327,15 @@ td.x{text-align:right;white-space:nowrap}
     if (e.energy != null) envParts.push(`投手能量 ${Math.round(e.energy * 100)}%`);
     if (e.pitcher_attr || e.batter_attr) envParts.push(`投手卡 ${e.pitcher_attr || "?"}・打者卡 ${e.batter_attr || "?"}`);
     $("envText").textContent = envParts.join("　");
-    $("perfText").textContent = s.connected ? `程式效能：每秒 ${Math.round(s.fps || 0)} 張・CPU 用量 ${s.cpu_pct ?? "-"}%（佔整台電腦）` : "";
+    $("perfText").textContent = (s.cpu_mode ? "⚙ 目前是「電腦對戰」模式（設定可改）　" : "") + (s.connected ? `程式效能：每秒 ${Math.round(s.fps || 0)} 張・CPU 用量 ${s.cpu_pct ?? "-"}%（佔整台電腦）` : "");
     // 設定
     const auto = s.row_mode === "auto";
     $("rowAuto").classList.toggle("on", auto);
     $("rowTop").classList.toggle("on", !auto && row === "top");
     $("rowBot").classList.toggle("on", !auto && row === "bottom");
     if (document.activeElement !== $("idInput")) $("idInput").value = s.my_id || "";
+    $("modeCpu").classList.toggle("on", !!s.cpu_mode); $("modeHuman").classList.toggle("on", !s.cpu_mode);
+    $("myAuto").classList.toggle("on", s.my_auto !== false); $("myManual").classList.toggle("on", s.my_auto === false);
     const side = row === "top" ? "先攻" : "後攻";
     $("sideText").textContent = !auto ? `手動：我方${side}` : s.row_status === "found" ? `找到 ${s.my_id} → 我方${side}`
       : s.row_status === "not_found" ? `畫面上找不到 ${s.my_id}，請手動選` : (s.my_id ? `尋找 ${s.my_id} 中…` : "請先輸入 ID");
@@ -424,6 +436,10 @@ td.x{text-align:right;white-space:nowrap}
   $("rowAuto").onclick = async () => { await post("/api/settings", { row_auto: true }); load(); };
   $("rowTop").onclick = async () => { await post("/api/settings", { my_batting_row: "top" }); load(); };
   $("rowBot").onclick = async () => { await post("/api/settings", { my_batting_row: "bottom" }); load(); };
+  $("modeHuman").onclick = async () => { await post("/api/settings", { cpu_mode: false }); toast("真人對戰：這場的球會拿來預測"); load(); };
+  $("modeCpu").onclick = async () => { await post("/api/settings", { cpu_mode: true }); toast("電腦對戰：這場的球不拿來預測（軌跡仍會用）"); load(); };
+  $("myAuto").onclick = async () => { await post("/api/settings", { my_auto: true }); toast("1 對 1 我方投球＝自動（電腦）"); load(); };
+  $("myManual").onclick = async () => { await post("/api/settings", { my_auto: false }); toast("1 對 1 我方投球＝手動（真人）"); load(); };
   $("newGame").onclick = async () => { await post("/api/settings", { new_game: true }); toast("已開始新的一場"); load(); };
   $("exportBtn").onclick = () => { location.href = "/api/export.csv?scope=all"; };
   $("undoBtn").onclick = async () => {

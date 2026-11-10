@@ -92,10 +92,48 @@ class PitchStore:
         """比賽環境欄位（天氣、風、卡片天氣屬性），舊資料庫自動補上。"""
         with self._connect() as conn:
             have = {r[1] for r in conn.execute("PRAGMA table_info(pitches)").fetchall()}
+            if "controller" not in have:
+                # 這球是誰投的：'cpu'（電腦／自動）、'human'（真人）、NULL（不確定，當真人）
+                conn.execute("ALTER TABLE pitches ADD COLUMN controller TEXT")
+                have.add("controller")
+            self._label_20261110(conn)
             for col in self.ENV_COLUMNS:
                 if col not in have:
                     typ = "INTEGER" if col in ("wind_angle", "wind_speed") else ("REAL" if col == "energy" else "TEXT")
                     conn.execute(f"ALTER TABLE pitches ADD COLUMN {col} {typ}")
+
+    @staticmethod
+    def _label_20261110(conn) -> None:
+        """使用者 11/10 確認過的標記（只有那幾場的 game_id 會對到，朋友的資料庫不受影響；只做一次）。"""
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+        if conn.execute("SELECT 1 FROM meta WHERE k='label_20261110'").fetchone():
+            return
+        cpu_games = ("game_20261110_090459", "game_20261110_100045", "game_20261110_105616",
+                     "game_20261110_113907", "game_20261110_124824", "game_20261110_184125")
+        q = ",".join("?" * len(cpu_games))
+        conn.execute(f"UPDATE pitches SET controller='cpu' WHERE game_id IN ({q})", cpu_games)
+        conn.execute("UPDATE pitches SET controller='human' WHERE game_id='game_20261110_145230' AND ts >= '2026-11-10T16:18'")
+        for g in ("game_20261110_185422", "game_20261110_191008"):
+            conn.execute("UPDATE pitches SET controller = CASE WHEN opponent_tag='KDBear' THEN 'cpu' ELSE 'human' END WHERE game_id=?", (g,))
+        # 「對手1」＝還沒讀到 ID 時的暫用名稱，那幾場的刪掉
+        dead = [r[0] for r in conn.execute(
+            "SELECT id FROM pitches WHERE opponent_tag='對手1' AND game_id IN ('game_20261110_100045','game_20261110_185422','game_20261110_191008')")]
+        for pid in dead:
+            conn.execute("DELETE FROM pitches WHERE id=?", (pid,))
+            try:
+                conn.execute("DELETE FROM predictions WHERE pitch_id=?", (pid,))
+            except Exception:
+                pass
+        conn.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('label_20261110', ?)", (str(len(dead)),))
+
+    def set_game_controller(self, game_id: str, controller: Optional[str], only_tag: Optional[str] = None) -> int:
+        """把一場（或其中某位玩家）的球改標成電腦／真人。"""
+        with self._connect() as conn:
+            if only_tag:
+                cur = conn.execute("UPDATE pitches SET controller=? WHERE game_id=? AND opponent_tag=?", (controller, game_id, only_tag))
+            else:
+                cur = conn.execute("UPDATE pitches SET controller=? WHERE game_id=?", (controller, game_id))
+            return cur.rowcount
 
     def _migrate_out_of_zone(self) -> None:
         """舊紀錄的框外代號（H / L / IN / OUT…）改成沿格線延伸後的九宮格號碼。"""
@@ -311,6 +349,8 @@ class PitchStore:
             )
             pid = int(cur.lastrowid)
             env = {k: record.get(k) for k in self.ENV_COLUMNS if record.get(k) not in (None, "")}
+            if record.get("controller") in ("cpu", "human"):
+                env["controller"] = record["controller"]
             if env:
                 conn.execute(
                     f"UPDATE pitches SET {', '.join(k + ' = ?' for k in env)} WHERE id = ?",
@@ -703,7 +743,8 @@ def _store_methods():
             ).fetchall()]
 
     def _model_rows(self, before_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        where, params = ["opponent_tag != ''", "opponent_tag != '對手1'", "zone != '0'"], []
+        # 電腦投的球不拿來訓練（電腦配球很規律，會讓模型學偏、回測虛高）
+        where, params = ["opponent_tag != ''", "opponent_tag != '對手1'", "zone != '0'", "IFNULL(controller,'') != 'cpu'"], []
         if before_id is not None:
             where.append("id < ?"); params.append(before_id)
         return list(reversed(_rows(self, " AND ".join(where), params)))
@@ -848,7 +889,7 @@ def _store_methods():
             )
 
     def prediction_accuracy(self, game_id: Optional[str] = None, opponent_tag: Optional[str] = None) -> Dict[str, Any]:
-        where, params = ["p.pitch_id = x.id"], []
+        where, params = ["p.pitch_id = x.id", "IFNULL(x.controller,'') != 'cpu'"], []
         if game_id:
             where.append("p.game_id = ?"); params.append(game_id)
         if opponent_tag:
