@@ -744,7 +744,7 @@ def _store_methods():
 
     def _model_rows(self, before_id: Optional[int] = None) -> List[Dict[str, Any]]:
         # 電腦投的球不拿來訓練（電腦配球很規律，會讓模型學偏、回測虛高）
-        where, params = ["opponent_tag != ''", "opponent_tag != '對手1'", "zone != '0'", "IFNULL(controller,'') != 'cpu'"], []
+        where, params = ["opponent_tag != ''", "opponent_tag != '對手1'", "IFNULL(controller,'') != 'cpu'"], []  # 漏記（zone 0）也留著接順序，訓練時跳過
         if before_id is not None:
             where.append("id < ?"); params.append(before_id)
         return list(reversed(_rows(self, " AND ".join(where), params)))
@@ -794,7 +794,8 @@ def _store_methods():
         where, params = ["opponent_tag = ?"], [opponent_tag]
         if before_id is not None:
             where.append("id < ?"); params.append(before_id)
-        hist = [h for h in reversed(_rows(self, " AND ".join(where), params)) if str(h["zone"]) != "0"]  # 舊 → 新，略過落點不明的漏記
+        all_rows = list(reversed(_rows(self, " AND ".join(where), params)))  # 舊 → 新（含落點不明的漏記，用來接順序）
+        hist = [h for h in all_rows if str(h["zone"]) != "0"]
         Z = [str(i) for i in range(1, 10)]
 
         def bucket(b, s):
@@ -802,43 +803,18 @@ def _store_methods():
                 return "x"
             return "2s" if s == 2 else ("behind" if b > s else ("ahead" if s > b else "even"))
 
-        def freq(pool):
-            n = len(pool)
-            c: Dict[str, int] = {}
-            for h in pool:
-                c[str(h["zone"])] = c.get(str(h["zone"]), 0) + 1
-            return {z: (c.get(z, 0) / n if n else 0.0) for z in Z}, n
-
-        k = 6.0
-        score = {z: 1.0 / 18 for z in Z}
-        bk = bucket(balls, strikes)
-        comps = [hist, [h for h in hist if bucket(h["balls_before"], h["strikes_before"]) == bk]]
-        if balls is not None and strikes is not None:
-            comps.append([h for h in hist if h["balls_before"] == balls and h["strikes_before"] == strikes])
-        for pool in comps:
-            fr, n = freq(pool)
-            a = n / (n + k)
-            for z in Z:
-                score[z] += a * fr[z]
-        # 上一球 → 下一球
-        cur_game = None
-        if before_id is not None:
+        cur_game = (ctx or {}).get("game_id")
+        if not cur_game and before_id is not None:
             with self._connect() as conn:
                 r = conn.execute("SELECT game_id FROM pitches WHERE id = ?", [before_id]).fetchone()
                 cur_game = r["game_id"] if r else None
-        elif hist:
-            cur_game = hist[-1]["game_id"]
-        if hist and hist[-1]["game_id"] == cur_game:
-            pz = str(hist[-1]["zone"])
-            tr: Dict[str, int] = {}
-            n = 0
-            for a_, b_ in zip(hist, hist[1:]):
-                if str(a_["zone"]) == pz and a_["game_id"] == b_["game_id"]:
-                    tr[str(b_["zone"])] = tr.get(str(b_["zone"]), 0) + 1
-                    n += 1
-            if n:
-                for z in Z:
-                    score[z] += (n / (n + k)) * tr.get(z, 0) / n
+        if not cur_game and all_rows:
+            cur_game = all_rows[-1]["game_id"]
+        # 統計：整體／球數情境／完全同球數＋打席內順序（第幾球、上一球、上兩球、上一球結果）（2026-11-10n）
+        from predict.habit import Habit
+        probs, habit_text = Habit().update_rows(all_rows).predict(opponent_tag, cur_game, balls, strikes)
+        score = dict(probs)
+        bk = bucket(balls, strikes)
         method = "統計"
         if hist:
             try:
@@ -865,9 +841,17 @@ def _store_methods():
                 "ball_pct": round(sum(1 for h in inz if h["result"] == "ball") * 100.0 / len(inz)) if inz else 0,
                 "out_pct": round(outn * 100.0 / len(loc)) if loc else 0,
             })
-        tpool = comps[1] if len([h for h in comps[1] if h.get("pitch_raw")]) >= 5 else hist
-        g = _grid_and_types(tpool)
-        return {"level": "這位玩家", "n": len(hist), "zones": zones if hist else [], "types": g["types"][:3],
+        # 球種只看「現在這位投手」（換投後不再混到前一位投手的球種）
+        cur_p = pitcher if pitcher and pitcher != "未知投手" else ""
+        types: List[Dict[str, Any]] = []
+        if cur_p:
+            norm = lambda x: "".join(str(x or "").split()).replace("．", ".").replace("・", "·")
+            key = norm(cur_p)
+            pp = [h for h in all_rows if norm(h.get("pitcher")) == key and h.get("pitch_raw")]
+            pb = [h for h in pp if bucket(h["balls_before"], h["strikes_before"]) == bk]
+            types = _grid_and_types(pb if len(pb) >= 5 else pp)["types"][:3] if pp else []
+        return {"level": "這位玩家", "n": len(hist), "zones": zones if hist else [], "types": types,
+                "type_pitcher": cur_p, "habit": habit_text,
                 "balls": balls, "strikes": strikes, "method": method}
 
     def score_prediction(self, pitch_id: int) -> None:

@@ -24,7 +24,7 @@ import numpy as np
 ZONES = [str(i) for i in range(1, 10)]
 RESULTS = ["strike", "ball", "foul", "in_play"]
 WEATHERS = ["晴", "雨", "陰", "雪"]
-MODEL_VERSION = 1
+MODEL_VERSION = 2  # 2026-11-10n：加入打席內順序習慣特徵
 
 
 def _bucket(b, s) -> str:
@@ -57,9 +57,27 @@ class _PlayerState:
         return (v + k / 9.0) / (v.sum() + k)
 
 
-def _features(st: _PlayerState, p: Dict[str, Any]) -> np.ndarray:
+class _States(defaultdict):
+    """各玩家統計＋配球習慣（predict.habit.Habit）。"""
+
+    def __init__(self) -> None:
+        super().__init__(_PlayerState)
+        from predict.habit import Habit
+        self.habit = Habit()
+
+
+def _features(st: _PlayerState, p: Dict[str, Any], habit=None) -> np.ndarray:
     b, s = p.get("balls_before"), p.get("strikes_before")
     f: List[float] = []
+    # 配球習慣（打席內順序）綜合機率＋這是打席第幾球
+    if habit is not None:
+        hp, _ = habit.predict(p.get("opponent_tag") or "", p.get("game_id"), b, s)
+        f += [hp[z] for z in ZONES]
+        idx = habit.state(p.get("opponent_tag") or "", p.get("game_id"), b, s)[0]
+    else:
+        f += [1 / 9] * 9
+        idx = 1
+    f += [1.0 if min(idx, 4) == i else 0.0 for i in (1, 2, 3, 4)]
     f += list(st._dist(st.all))
     f += list(st._dist(st.bucket[_bucket(b, s)]))
     f += list(st._dist(st.count[(b, s)]))
@@ -103,18 +121,22 @@ def _update(st: _PlayerState, p: Dict[str, Any]) -> None:
 
 def build_dataset(rows: Iterable[Dict[str, Any]]):
     """依時間順序（id 由小到大）重算每一球當時的特徵。回傳 X, y, 對應的列。"""
-    states: Dict[str, _PlayerState] = defaultdict(_PlayerState)
+    states = _States()
     X, y, used = [], [], []
     for p in rows:
         tag = p.get("opponent_tag") or ""
         z = str(p.get("zone"))
-        if not tag or z not in ZONES:
+        if not tag:
+            continue
+        if z not in ZONES:
+            states.habit.update(tag, p.get("game_id"), p.get("balls_before"), p.get("strikes_before"), z, p.get("result"))
             continue
         st = states[tag]
-        X.append(_features(st, p))
+        X.append(_features(st, p, states.habit))
         y.append(ZONES.index(z))
         used.append(p)
         _update(st, p)
+        states.habit.update(tag, p.get("game_id"), p.get("balls_before"), p.get("strikes_before"), z, p.get("result"))
     if not X:
         return np.zeros((0, 1)), np.zeros(0, dtype=int), [], states
     return np.vstack(X), np.asarray(y), used, states
@@ -143,7 +165,19 @@ def topk_hits(P: np.ndarray, y: np.ndarray, k: int) -> float:
 
 
 def stats_baseline(used: List[Dict[str, Any]], test_from: int) -> np.ndarray:
-    """統計算法（store.predict 的同一套加權混合＋上一球）在測試區間的機率，用來比較。"""
+    """統計算法（store.predict 的同一套：整體／球數＋打席內順序習慣）在測試區間的機率，用來比較。"""
+    from predict.habit import Habit
+    h = Habit()
+    out = []
+    for idx, p in enumerate(used):
+        if idx >= test_from:
+            pr, _ = h.predict(p["opponent_tag"], p.get("game_id"), p.get("balls_before"), p.get("strikes_before"))
+            out.append(np.array([pr[z] for z in ZONES]))
+        h.update(p["opponent_tag"], p.get("game_id"), p.get("balls_before"), p.get("strikes_before"), p.get("zone"), p.get("result"))
+    return np.vstack(out) if out else np.zeros((0, 9))
+
+
+def _old_stats_baseline(used: List[Dict[str, Any]], test_from: int) -> np.ndarray:
     states: Dict[str, _PlayerState] = defaultdict(_PlayerState)
     out = []
     k = 6.0
@@ -191,33 +225,31 @@ class ZoneModel:
     def __init__(self, W: np.ndarray, meta: Dict[str, Any]) -> None:
         self.W = W
         self.meta = meta
-        self.states: Dict[str, _PlayerState] = defaultdict(_PlayerState)
+        self.states = _States()
 
     @property
     def active(self) -> bool:
         return bool(self.meta.get("active"))
 
     def warm(self, rows: Iterable[Dict[str, Any]]) -> None:
-        self.states = defaultdict(_PlayerState)
-        for p in rows:
-            if p.get("opponent_tag") and str(p.get("zone")) in ZONES:
-                _update(self.states[p["opponent_tag"]], p)
+        self.states = player_states(rows)
 
-    def observe(self, p: Dict[str, Any]) -> None:
-        if p.get("opponent_tag") and str(p.get("zone")) in ZONES:
-            _update(self.states[p["opponent_tag"]], p)
-
-    def predict(self, ctx: Dict[str, Any], states: Optional[Dict[str, _PlayerState]] = None) -> np.ndarray:
-        st = (states if states is not None else self.states)[ctx.get("opponent_tag") or ""]
-        x = _features(st, ctx)[None, :]
+    def predict(self, ctx: Dict[str, Any], states=None) -> np.ndarray:
+        S = states if states is not None else self.states
+        st = S[ctx.get("opponent_tag") or ""]
+        x = _features(st, ctx, getattr(S, "habit", None))[None, :]
         return _softmax(x @ self.W)[0]
 
 
-def player_states(rows: Iterable[Dict[str, Any]]) -> Dict[str, _PlayerState]:
-    states: Dict[str, _PlayerState] = defaultdict(_PlayerState)
+def player_states(rows: Iterable[Dict[str, Any]]) -> "_States":
+    states = _States()
     for p in rows:
-        if p.get("opponent_tag") and str(p.get("zone")) in ZONES:
-            _update(states[p["opponent_tag"]], p)
+        tag = p.get("opponent_tag")
+        if not tag:
+            continue
+        if str(p.get("zone")) in ZONES:
+            _update(states[tag], p)
+        states.habit.update(tag, p.get("game_id"), p.get("balls_before"), p.get("strikes_before"), p.get("zone"), p.get("result"))
     return states
 
 

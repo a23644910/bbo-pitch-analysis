@@ -12,7 +12,7 @@
   - 界外／擊出：先暫記，等記分板球數確認後自動改正（`_hit_check`、`_resolve_hit`）。
   - 重播防護：鏡頭切回打擊畫面時會重顯上一球標記，不能重複記。
   - 2 對 2：每隊兩位玩家，**玩家1 投單數局、玩家2 投雙數局**（`_players_for`）。客隊＝記分板上行（先攻）。
-- `store/db.py`：SQLite `data/bbo_pitches.db`。`pitches` 一球一筆；`predictions` 每球的預測與命中；`player_view`、`predict`（只分玩家：全部／球數情境／同球數加權混合＋上一球轉移）、`score_prediction`、`prediction_accuracy`。
+- `store/db.py`：SQLite `data/bbo_pitches.db`。`pitches` 一球一筆；`predictions` 每球的預測與命中；`player_view`、`predict`（落點只分玩家：`predict/habit.py` 的配球習慣＝全部／球數情境／同球數＋打席內第幾球、上一球、上兩球、上一球結果，越具體權重越高，回傳最明顯的一個習慣說明；**球種只看現在這位投手**，名字去空白比對）、`score_prediction`、`prediction_accuracy`。
 - `capture/recorder.py`：飛行記錄器（可疑狀況自動存前後畫面到 `data/feedback/`）、整場錄影（預設關）。
 
 ## 座標
@@ -37,7 +37,7 @@
 - 電腦／真人（2026-11-10m）：pitches.controller＝'cpu'／'human'／NULL（當真人）。`_controller_for`：設定 cpu_mode（電腦對戰）→ cpu；2 對 2 → human（使用者：多對多都是真人）；1 對 1 我方 ID → 看 my_auto（使用者 1 對 1 習慣自動投球，預設 True）；其他 → human。`_model_rows`、`prediction_accuracy` 排除 cpu（電腦配球規律，會讓 AI 學偏、命中率虛高）；軌跡片段仍用全部。網頁設定可切換，切換時這一場已記的球一起改標（`set_play_mode`）。畫面上找不到能自動分辨電腦／真人的標示。`_label_20261110` 一次性補標使用者確認過的 11/10 場次並刪掉 5 筆「對手1」（meta 表記錄做過）。
 - 已做（2026-11-10d）：換場清空 ID、每 15 秒與攻守交換時重讀 ID，任一隊全部換人＝自動開新場；即時數據跟玩家＋總球數；九宮格「壞球率」（原名帶外比例，x_norm/y_norm 超出 0~1，使用者要求改名）＋追打率；記分板逐球審核（好壞球判反自動改、漏記補一筆 zone="0" 不計入九宮格）；低優先權、執行緒上限、非打擊畫面降到 10 fps。
 - 待做：輕量化進階（只截需要區域、OCR 標籤改 mobile 模型——改前先用錄影比對錯字率）；軌跡辨識球種／球速（先做可行性測試，用 NVIDIA 60fps 錄影；天氣、屬性相剋、投手能量條會影響軌跡，畫面上讀得到就一起記）；修正之前記錯對手 ID 的場次（要讀使用者電腦的 DB）。
-- 下一球預測 AI（`predict/model.py`，2026-11-10g）：numpy 多類別邏輯回歸，特徵＝玩家歷史分布（全部／球數情境／同球數／上一球轉移）、球數、出局、上一球、天氣風能量。啟動時與每場結束（`start_new_game`）自動重訓，模型存 `data/zone_model.npy/.json`；時間序回測（後 25%）AI 第一名＋前三名命中率加總贏過統計才啟用（`store.predict` 的 method＝AI／統計）。11/10 資料 1542 球回測：AI 第一名 29.5%／前三 68.7%，統計 22.0%／65.8%。
+- 下一球預測 AI（`predict/model.py`，2026-11-10g；n 版 MODEL_VERSION 2 加入配球習慣機率＋打席第幾球）：numpy 多類別邏輯回歸，特徵＝玩家歷史分布（全部／球數情境／同球數／上一球轉移）、配球習慣、球數、出局、上一球、天氣風能量。回測的「統計」基準也改成配球習慣版。11/10 晚只有 265 球真人資料，AI 輸給統計，先用統計。啟動時與每場結束（`start_new_game`）自動重訓，模型存 `data/zone_model.npy/.json`；時間序回測（後 25%）AI 第一名＋前三名命中率加總贏過統計才啟用（`store.predict` 的 method＝AI／統計）。11/10 資料 1542 球回測：AI 第一名 29.5%／前三 68.7%，統計 22.0%／65.8%。
 - 軌跡錄影（`tools/record_game.py`、`4_軌跡錄影.bat`）：dxcam 只截遊戲畫面、固定 60fps、縮成 1920x1080、NVENC（失敗用 x264 crf18），存 `data/trajectory/<時間>.mp4` 與每幀時間 `.csv`。Windows 實測平均約 59 fps。最長 2 小時，看到結算畫面（確認BOX）連續 2 秒自動停。
 - 投球片段（`tools/cut_pitch_clips.py`、`5_切投球片段.bat`）：用 csv 寫完時間回推錄影起點，對照 DB 每球 ts，切「記錄前 7 秒～後 1 秒」、畫面 x 0.30–0.70 y 0.25–0.95、原解析度，各球種平均挑 120 球（`--all` 全切），輸出 `data/trajectory/clips/<id>.mp4/.csv` + `index.csv`（含球種球速天氣能量）。給軌跡辨識可行性測試用（每段約 3～4MB）。
 - 測試方式：用 `data/recordings/*.mp4 + .jsonl` 重播，OCR 用假物件取代（`sys.modules['ocr.engine']`）；漏記檢查＝前後球數是否連續。

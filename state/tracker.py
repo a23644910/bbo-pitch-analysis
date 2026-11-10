@@ -55,7 +55,7 @@ class PendingPitch:
     strikes_before: Optional[int]
     missing_frames: int = 0
     fielding_cut_frames: int = 0
-    # 鏡頭離開打擊畫面的「秒數」（2026-11-10m：改用秒數判斷擊出／界外，主程式偶爾卡住時張數會算少）
+    # 鏡頭離開打擊畫面的「秒數」（2026-11-10n：改用秒數判斷擊出／界外，主程式偶爾卡住時張數會算少）
     fielding_cut_sec: float = 0.0
     post_marker_frames: int = 0
     marker_gone: bool = False
@@ -76,7 +76,7 @@ class PendingPitch:
 
 
 # 網頁會比對這個版本號，後台沒重開時提醒使用者
-APP_VERSION = "2026-11-10m"
+APP_VERSION = "2026-11-10n"
 
 
 @dataclass
@@ -222,7 +222,7 @@ class GameSessionTracker:
         self._label_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-label")
         self._jobs: Dict[str, Any] = {}
         self._job_seq: int = 0
-        # 背景 OCR 排程（2026-11-10m）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
+        # 背景 OCR 排程（2026-11-10n）：一次只跑一件、投球前後先暫停，避免開場一次排一堆把 CPU 吃滿、主程式卡住好幾秒漏球
         self._wants: Dict[str, Tuple[Any, tuple, dict]] = {}
         self._bg_running: bool = False
         self._bg_free_since: float = -999.0
@@ -1029,7 +1029,7 @@ class GameSessionTracker:
         # 0. 比賽結束／新比賽
         #   看到結算畫面（右上藍色「確認BOX」按鈕）→ 停止記錄；
         #   之後要同時看到「1 局上」且「比分 0:0」連續兩次，才自動開新的一場。
-        #   2026-11-10m：比賽中偶爾有藍色長方形（彈出視窗等）被當成按鈕 → 整場後半停止記錄。
+        #   2026-11-10n：比賽中偶爾有藍色長方形（彈出視窗等）被當成按鈕 → 整場後半停止記錄。
         #   改成連續 3 次都看到才算結束；結束後若又看到「打擊畫面＋不是 1 局上 0:0」連續兩次 → 判斷是誤判，接著記同一場。
         if not self.game_over:
             if not sb.valid and not batting_cam and self._frame_idx % 15 == 7:
@@ -1215,7 +1215,7 @@ class GameSessionTracker:
         done, out = self._take("info")
         res = None
         if done and out:
-            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10m）：
+            # 換邊時右下角名字面板會比「程式認定的打擊方」更早換人（2026-11-10n）：
             # 以前在這空檔讀到下半局的投手，被記到另一隊 → 整場兩隊投手對調、打者讀不到、一直重讀卡 CPU。
             # 擷取當下記分板的打擊方 ≠ 目前認定的打擊方，或現在記分板已經換邊 → 這次讀到的名字不用。
             row_cap, res = out
@@ -1466,7 +1466,7 @@ class GameSessionTracker:
                         p.label_checked = True
                         p.label_ok = False
 
-            # 先記錄、晚點補球種球速（2026-11-10m）：
+            # 先記錄、晚點補球種球速（2026-11-10n）：
             #   ⊗ 一定是壞球 → 不等 OCR；◎ 旁邊的標籤用圖形比對認出「STRIKE」字樣就算好球 → 也不等 OCR。
             #   OCR 讀完後由 _poll_label_fill 補進同一筆。圖形比對認不出來時才照舊等 OCR 確認。
             if bd.kind == "bullseye" and bd.has_label and not p.label_checked and p.tpl_word is None:
